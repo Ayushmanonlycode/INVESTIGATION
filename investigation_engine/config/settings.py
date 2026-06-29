@@ -1,0 +1,401 @@
+"""Investigation Engine configuration system.
+
+Uses Pydantic Settings for hierarchical configuration with the following
+priority (highest to lowest):
+    1. Programmatic overrides (constructor kwargs)
+    2. Environment variables (prefixed with IE_)
+    3. .env file
+    4. Code defaults
+
+All thresholds are intentionally conservative defaults. Investigation modules
+should respect these values but may override them for domain-specific needs
+via the module-level config mechanism.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class EngineSettings(BaseSettings):
+    """Core engine execution settings."""
+
+    max_rows_sample: int = Field(
+        default=1_000_000,
+        ge=100,
+        description="Maximum rows to load before sampling. Datasets larger than this are sampled.",
+    )
+    max_findings_per_module: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Maximum findings a single module can produce.",
+    )
+    parallel_modules: bool = Field(
+        default=False,
+        description="Execute investigation modules in parallel (experimental).",
+    )
+    fail_fast: bool = Field(
+        default=False,
+        description="Stop investigation on first module failure.",
+    )
+    enabled_modules: list[str] | None = Field(
+        default=None,
+        description="Explicit list of module names to run. None means all registered modules.",
+    )
+    disabled_modules: list[str] = Field(
+        default_factory=list,
+        description="Module names to exclude from investigation.",
+    )
+
+
+class IntegritySettings(BaseSettings):
+    """Configurable thresholds for the Integrity Investigator.
+
+    All severity boundaries and detection thresholds are configurable
+    to allow domain-specific tuning without code changes.
+    """
+
+    # ── Missing Value Thresholds ──────────────────────────────────────
+    missing_critical_threshold: float = Field(
+        default=0.50,
+        ge=0.0,
+        le=1.0,
+        description="Missing ratio above this is CRITICAL severity.",
+    )
+    missing_high_threshold: float = Field(
+        default=0.30,
+        ge=0.0,
+        le=1.0,
+        description="Missing ratio above this is HIGH severity.",
+    )
+    missing_medium_threshold: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        description="Missing ratio above this is MEDIUM severity.",
+    )
+    missing_low_threshold: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Missing ratio above this is LOW severity. Below this is not reported.",
+    )
+    missing_empty_column_threshold: float = Field(
+        default=0.99,
+        ge=0.0,
+        le=1.0,
+        description="Missing ratio above this flags column as completely empty.",
+    )
+
+    # ── Duplicate Thresholds ──────────────────────────────────────────
+    duplicate_critical_threshold: float = Field(
+        default=0.20,
+        ge=0.0,
+        le=1.0,
+        description="Duplicate ratio above this is CRITICAL severity.",
+    )
+    duplicate_high_threshold: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        description="Duplicate ratio above this is HIGH severity.",
+    )
+    duplicate_medium_threshold: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Duplicate ratio above this is MEDIUM severity.",
+    )
+    duplicate_low_threshold: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        description="Duplicate ratio above this is LOW severity.",
+    )
+
+    # ── Constant / Near-Constant Thresholds ───────────────────────────
+    constant_dominance_threshold: float = Field(
+        default=0.9999,
+        ge=0.0,
+        le=1.0,
+        description="Value dominance ratio above this flags column as constant.",
+    )
+    near_constant_dominance_threshold: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Value dominance ratio above this flags column as near-constant.",
+    )
+
+    # ── Cardinality Thresholds ────────────────────────────────────────
+    high_cardinality_ratio: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=1.0,
+        description="Unique ratio above this flags high cardinality for non-ID columns.",
+    )
+    low_cardinality_max_unique: int = Field(
+        default=2,
+        ge=1,
+        description="Unique count at or below this flags low cardinality (non-boolean).",
+    )
+
+    # ── Identifier Detection Thresholds ───────────────────────────────
+    id_uniqueness_threshold: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Unique ratio above this to consider a column as a potential identifier.",
+    )
+    id_column_patterns: list[str] = Field(
+        default_factory=lambda: [
+            "id", "uuid", "uid", "key", "code", "identifier",
+            "index", "pk", "serial", "number", "num", "no",
+        ],
+        description="Substrings in column names that suggest identifier columns.",
+    )
+
+    # ── Datatype Integrity ────────────────────────────────────────────
+    numeric_string_sample_size: int = Field(
+        default=1000,
+        ge=10,
+        description="Sample size for detecting numeric values stored as strings.",
+    )
+    numeric_string_threshold: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of parseable numeric values to flag string column as mistyped.",
+    )
+    mixed_type_threshold: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        description="Fraction of values with different inferred type to flag mixed types.",
+    )
+
+    # ── Missingness Correlation ───────────────────────────────────────
+    missingness_correlation_threshold: float = Field(
+        default=0.70,
+        ge=0.0,
+        le=1.0,
+        description="Correlation between missing indicators above this is reported.",
+    )
+    missingness_min_missing_ratio: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        description="Minimum missing ratio for a column to be included in missingness correlation.",
+    )
+
+    # ── Structural Health Score Weights ────────────────────────────────
+    health_weight_missing: float = Field(default=0.25, ge=0.0, le=1.0)
+    health_weight_duplicates: float = Field(default=0.15, ge=0.0, le=1.0)
+    health_weight_constants: float = Field(default=0.10, ge=0.0, le=1.0)
+    health_weight_types: float = Field(default=0.20, ge=0.0, le=1.0)
+    health_weight_identifiers: float = Field(default=0.15, ge=0.0, le=1.0)
+    health_weight_cardinality: float = Field(default=0.15, ge=0.0, le=1.0)
+
+
+class ThresholdSettings(BaseSettings):
+    """Statistical thresholds for investigation modules.
+
+    These are conservative defaults designed to minimize false positives
+    while catching genuinely interesting patterns.
+    """
+
+    # Outlier Detection
+    outlier_z_threshold: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=10.0,
+        description="Z-score threshold for outlier detection.",
+    )
+    outlier_iqr_multiplier: float = Field(
+        default=1.5,
+        ge=1.0,
+        le=5.0,
+        description="IQR multiplier for Tukey's fence outlier detection.",
+    )
+
+    # Correlation
+    correlation_threshold: float = Field(
+        default=0.8,
+        ge=0.0,
+        le=1.0,
+        description="Minimum absolute correlation to report as a finding.",
+    )
+
+    # Missing Values
+    missing_value_threshold: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Minimum missing ratio to flag as a finding.",
+    )
+
+    # Low Variance
+    low_variance_threshold: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        description="Coefficient of variation below this is flagged as low variance.",
+    )
+
+    # Class Imbalance
+    class_imbalance_ratio: float = Field(
+        default=10.0,
+        ge=1.0,
+        description="Majority/minority class ratio threshold for imbalance detection.",
+    )
+
+    # Duplicate Detection
+    duplicate_threshold: float = Field(
+        default=0.01,
+        ge=0.0,
+        le=1.0,
+        description="Minimum duplicate ratio to flag as a finding.",
+    )
+
+    # Clustering
+    min_cluster_samples: int = Field(
+        default=50,
+        ge=2,
+        description="Minimum samples required for cluster discovery.",
+    )
+    max_clusters: int = Field(
+        default=20,
+        ge=2,
+        le=100,
+        description="Maximum clusters to discover.",
+    )
+
+    # Feature Importance
+    min_feature_importance: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description="Minimum feature importance score to report.",
+    )
+
+    # Statistical Significance
+    significance_level: float = Field(
+        default=0.05,
+        ge=0.001,
+        le=0.1,
+        description="P-value threshold for statistical significance.",
+    )
+
+
+class LoggingSettings(BaseSettings):
+    """Logging configuration."""
+
+    log_level: str = Field(
+        default="INFO",
+        description="Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL.",
+    )
+    log_file: str | None = Field(
+        default=None,
+        description="Optional file path for log output.",
+    )
+    log_format: str = Field(
+        default=(
+            "<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> | "
+            "<level>{message}</level>"
+        ),
+        description="Loguru format string.",
+    )
+    log_rotation: str = Field(
+        default="10 MB",
+        description="Log file rotation size.",
+    )
+    log_retention: str = Field(
+        default="7 days",
+        description="Log file retention period.",
+    )
+
+    @field_validator("log_level")
+    @classmethod
+    def validate_log_level(cls, v: str) -> str:
+        """Ensure log level is valid."""
+        valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+        upper = v.upper()
+        if upper not in valid_levels:
+            raise ValueError(f"Invalid log level: {v}. Must be one of {valid_levels}.")
+        return upper
+
+
+class Settings(BaseSettings):
+    """Root configuration for the Investigation Engine.
+
+    Composes engine, threshold, and logging settings into a single
+    configuration object. All settings can be overridden via environment
+    variables with the IE_ prefix.
+
+    Examples:
+        IE_MAX_ROWS_SAMPLE=500000
+        IE_OUTLIER_Z_THRESHOLD=2.5
+        IE_LOG_LEVEL=DEBUG
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="IE_",
+        env_nested_delimiter="__",
+        case_sensitive=False,
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    # Composed settings groups
+    engine: EngineSettings = Field(default_factory=EngineSettings)
+    thresholds: ThresholdSettings = Field(default_factory=ThresholdSettings)
+    logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    integrity: IntegritySettings = Field(default_factory=IntegritySettings)
+
+    # Output
+    output_dir: Path | None = Field(
+        default=None,
+        description="Directory to write investigation output. None for no file output.",
+    )
+    output_format: str = Field(
+        default="json",
+        description="Output format: 'json' or 'pickle'.",
+    )
+
+    @field_validator("output_format")
+    @classmethod
+    def validate_output_format(cls, v: str) -> str:
+        """Ensure output format is supported."""
+        valid_formats = {"json", "pickle"}
+        lower = v.lower()
+        if lower not in valid_formats:
+            raise ValueError(f"Invalid output format: {v}. Must be one of {valid_formats}.")
+        return lower
+
+    def get_module_config(self, module_name: str) -> dict[str, Any]:
+        """Retrieve threshold-level configuration relevant to a specific module.
+
+        This provides a convention-based way for modules to access their
+        thresholds without coupling to the full Settings object.
+
+        Args:
+            module_name: Name of the module requesting config.
+
+        Returns:
+            Dictionary of relevant configuration values.
+        """
+        threshold_dict = self.thresholds.model_dump()
+        engine_dict = self.engine.model_dump()
+        return {
+            "module_name": module_name,
+            **threshold_dict,
+            **engine_dict,
+        }
