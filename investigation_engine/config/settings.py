@@ -202,6 +202,87 @@ class IntegritySettings(BaseSettings):
     health_weight_cardinality: float = Field(default=0.15, ge=0.0, le=1.0)
 
 
+class RelationshipSettings(BaseSettings):
+    """Configurable thresholds for the Relationship Investigator."""
+
+    pearson_threshold: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Minimum absolute Pearson correlation to report.",
+    )
+    spearman_threshold: float = Field(
+        default=0.80,
+        ge=0.0,
+        le=1.0,
+        description="Minimum absolute Spearman correlation to report.",
+    )
+    redundancy_threshold: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Minimum absolute correlation to treat features as redundant.",
+    )
+    strong_group_threshold: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=1.0,
+        description="Minimum edge strength for strong feature groups.",
+    )
+    community_threshold: float = Field(
+        default=0.75,
+        ge=0.0,
+        le=1.0,
+        description="Minimum edge strength for relationship communities.",
+    )
+    mutual_information_threshold: float = Field(
+        default=0.20,
+        ge=0.0,
+        description="Minimum mutual information score to report.",
+    )
+    vif_high_threshold: float = Field(
+        default=5.0,
+        ge=1.0,
+        description="VIF above this is reported as problematic multicollinearity.",
+    )
+    vif_very_high_threshold: float = Field(
+        default=10.0,
+        ge=1.0,
+        description="VIF above this is severe multicollinearity.",
+    )
+    min_pair_observations: int = Field(
+        default=30,
+        ge=5,
+        description="Minimum complete observations required for a pairwise test.",
+    )
+    mi_max_rows: int = Field(
+        default=5000,
+        ge=100,
+        description="Maximum sampled rows used for pairwise mutual information.",
+    )
+    mi_max_columns: int = Field(
+        default=150,
+        ge=2,
+        description="Maximum numeric columns included in pairwise mutual information scans.",
+    )
+    mi_n_neighbors: int = Field(
+        default=3,
+        ge=1,
+        description="Neighbors parameter for sklearn mutual information estimation.",
+    )
+    target_column_candidates: list[str] = Field(
+        default_factory=lambda: [
+            "target",
+            "label",
+            "class",
+            "response",
+            "outcome",
+            "y",
+        ],
+        description="Common column names treated as target candidates when metadata is absent.",
+    )
+
+
 class ThresholdSettings(BaseSettings):
     """Statistical thresholds for investigation modules.
 
@@ -359,6 +440,7 @@ class Settings(BaseSettings):
     thresholds: ThresholdSettings = Field(default_factory=ThresholdSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     integrity: IntegritySettings = Field(default_factory=IntegritySettings)
+    relationship: RelationshipSettings = Field(default_factory=RelationshipSettings)
 
     # Output
     output_dir: Path | None = Field(
