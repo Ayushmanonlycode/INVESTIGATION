@@ -54,6 +54,18 @@ class Investigation(BaseModel):
         default_factory=list,
         description="List of IDs of Findings backing this investigation.",
     )
+    supporting_evidence: list[str] = Field(
+        default_factory=list,
+        description="EvidenceUnit IDs supporting this investigation.",
+    )
+    supporting_hypotheses: list[str] = Field(
+        default_factory=list,
+        description="Hypothesis IDs that produced this investigation.",
+    )
+    contradicting_evidence: list[str] = Field(
+        default_factory=list,
+        description="EvidenceUnit IDs that weaken or complicate this investigation.",
+    )
     evidence_score: float = Field(
         ...,
         ge=0.0,
@@ -80,9 +92,17 @@ class Investigation(BaseModel):
         default_factory=list,
         description="Actionable steps the analyst should take next.",
     )
+    priority_explanation: list[str] = Field(
+        default_factory=list,
+        description="Human-readable explanation of the computed priority.",
+    )
     affected_columns: list[str] = Field(
         default_factory=list,
         description="List of columns involved in this investigation.",
+    )
+    provenance: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Lineage linking the investigation back to hypotheses and findings.",
     )
     metadata: dict[str, Any] = Field(
         default_factory=dict,

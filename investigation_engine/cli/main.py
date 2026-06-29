@@ -178,20 +178,27 @@ def _display_summary(result: "InvestigationResult", verbose: bool = False) -> No
     else:
         console.print("\n[dim]No findings produced.[/dim]")
 
-    # Fused Investigations summary
-    console.print(f"[bold]Fused Investigations:[/bold] [green]{len(result.investigations)} unified hypothesis/hypotheses synthesized[/green]")
+    console.print(
+        f"[bold]Evidence Units:[/bold] [green]{len(result.evidence_units)}[/green] | "
+        f"[bold]Knowledge Objects:[/bold] [green]{len(result.knowledge_objects)}[/green] | "
+        f"[bold]Hypotheses:[/bold] [green]{len(result.hypotheses)}[/green]"
+    )
+    console.print(
+        f"[bold]Investigation Queue:[/bold] "
+        f"[green]{len(result.investigations)} prioritized investigation(s) synthesized[/green]"
+    )
 
     # Investigations table
     if result.investigations and verbose:
         table = Table(
-            title="Synthesized Investigations (Evidence Fusion)",
+            title="Synthesized Investigations (Evidentiary Reasoning)",
             show_lines=True,
             title_style="bold green",
         )
         table.add_column("Priority", style="bold magenta", justify="right", width=10)
         table.add_column("Title", style="bold white", width=40)
         table.add_column("Confidence", justify="right", width=12)
-        table.add_column("Evidence Count", justify="right", width=15)
+        table.add_column("Evidence Units", justify="right", width=15)
         table.add_column("Columns", width=25)
 
         for inv in result.investigations:
@@ -202,7 +209,7 @@ def _display_summary(result: "InvestigationResult", verbose: bool = False) -> No
                 f"{inv.priority:.1f}",
                 inv.title,
                 f"{inv.confidence:.0%}",
-                f"{len(inv.supporting_findings)} finding(s)",
+                f"{len(inv.supporting_evidence)} unit(s)",
                 ", ".join(inv.affected_columns[:3])
                 + ("..." if len(inv.affected_columns) > 3 else ""),
             )

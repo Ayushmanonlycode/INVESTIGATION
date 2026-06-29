@@ -295,8 +295,8 @@ class InvestigationEngine:
             elif record.status == "skipped":
                 skipped.append(module.name)
 
-        # Fuse findings into investigations
-        investigations = self._fusion_engine.fuse_findings(all_findings)
+        # Run post-investigation reasoning pipeline
+        reasoning = self._fusion_engine.build_reasoning_artifacts(all_findings)
 
         # Build result
         wall_elapsed = time.perf_counter() - wall_start
@@ -305,7 +305,10 @@ class InvestigationEngine:
         result = InvestigationResult(
             dataset_info=dataset_info,
             findings=all_findings,
-            investigations=investigations,
+            evidence_units=reasoning.evidence_units,
+            knowledge_objects=reasoning.knowledge_objects,
+            hypotheses=reasoning.hypotheses,
+            investigations=reasoning.investigation_queue.investigations,
             module_records=all_records,
             modules_executed=executed,
             modules_failed=failed,
@@ -316,6 +319,7 @@ class InvestigationEngine:
             metadata={
                 "engine_version": "0.1.0",
                 "config_snapshot": self._config.model_dump(mode="json"),
+                "reasoning_summary": reasoning.investigation_queue.metadata,
             },
         )
 
@@ -391,13 +395,16 @@ class InvestigationEngine:
 
         wall_elapsed = time.perf_counter() - wall_start
 
-        # Fuse findings into investigations
-        investigations = self._fusion_engine.fuse_findings(all_findings)
+        # Run post-investigation reasoning pipeline
+        reasoning = self._fusion_engine.build_reasoning_artifacts(all_findings)
 
         result = InvestigationResult(
             dataset_info=dataset_info,
             findings=all_findings,
-            investigations=investigations,
+            evidence_units=reasoning.evidence_units,
+            knowledge_objects=reasoning.knowledge_objects,
+            hypotheses=reasoning.hypotheses,
+            investigations=reasoning.investigation_queue.investigations,
             module_records=all_records,
             modules_executed=executed,
             modules_failed=failed,
@@ -405,7 +412,10 @@ class InvestigationEngine:
             started_at=investigation_start,
             completed_at=datetime.now(timezone.utc),
             duration_seconds=wall_elapsed,
-            metadata={"engine_version": "0.1.0"},
+            metadata={
+                "engine_version": "0.1.0",
+                "reasoning_summary": reasoning.investigation_queue.metadata,
+            },
         )
 
         result.sort_findings_by_severity()
