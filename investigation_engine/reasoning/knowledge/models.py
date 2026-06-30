@@ -22,6 +22,10 @@ class KnowledgeObject(BaseModel):
         default_factory=list,
         description="EvidenceUnit IDs supporting this concept.",
     )
+    knowledge_graph_id: str | None = Field(
+        default=None,
+        description="Identifier of the semantic knowledge community that produced this concept.",
+    )
     related_concepts: list[str] = Field(
         default_factory=list,
         description="Concept names linked semantically to this concept.",
@@ -31,6 +35,12 @@ class KnowledgeObject(BaseModel):
         description="Lineage back to evidence units, findings, and investigators.",
     )
     confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in the concept.")
+    abstraction_level: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Degree of semantic abstraction above raw evidence.",
+    )
     metadata: dict[str, Any] = Field(
         default_factory=dict,
         description="Extensible knowledge metadata.",

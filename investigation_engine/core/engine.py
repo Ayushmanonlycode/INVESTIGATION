@@ -32,6 +32,8 @@ from investigation_engine.models.dataset import DatasetInfo
 from investigation_engine.models.finding import Finding
 from investigation_engine.models.investigation import InvestigationResult, ModuleExecutionRecord
 from investigation_engine.modules.base import BaseInvestigationModule
+from investigation_engine.reasoning.metrics import ReasoningMetricsEngine
+from investigation_engine.reasoning.provenance.renderer import ProvenanceTreeRenderer
 from investigation_engine.utils.logging import configure_logging
 
 
@@ -61,6 +63,8 @@ class InvestigationEngine:
         self._config = config or Settings()
         self._loader = DatasetLoader(self._config)
         self._fusion_engine = EvidenceFusionEngine(self._config)
+        self._metrics_engine = ReasoningMetricsEngine(self._config.evidence_compression)
+        self._provenance_renderer = ProvenanceTreeRenderer()
         self._modules_discovered = False
 
         # Configure logging
@@ -319,9 +323,25 @@ class InvestigationEngine:
             metadata={
                 "engine_version": "0.1.0",
                 "config_snapshot": self._config.model_dump(mode="json"),
-                "reasoning_summary": reasoning.investigation_queue.metadata,
+                "reasoning_summary": {
+                    **reasoning.investigation_queue.metadata,
+                    "layer_timings": reasoning.layer_timings,
+                },
             },
         )
+        result.reasoning_metrics = self._metrics_engine.build(
+            all_findings,
+            result.evidence_units,
+            result.knowledge_objects,
+            result.hypotheses,
+            result.investigations,
+            graph=reasoning.evidence_graph,
+            communities=reasoning.evidence_communities,
+            layer_timings=reasoning.layer_timings,
+            total_runtime_seconds=wall_elapsed,
+            dataset_memory_bytes=dataset_info.memory_usage_bytes,
+        )
+        result.provenance_trees = self._provenance_renderer.build(result)
 
         # Sort findings by severity
         result.sort_findings_by_severity()
@@ -414,9 +434,25 @@ class InvestigationEngine:
             duration_seconds=wall_elapsed,
             metadata={
                 "engine_version": "0.1.0",
-                "reasoning_summary": reasoning.investigation_queue.metadata,
+                "reasoning_summary": {
+                    **reasoning.investigation_queue.metadata,
+                    "layer_timings": reasoning.layer_timings,
+                },
             },
         )
 
+        result.reasoning_metrics = self._metrics_engine.build(
+            all_findings,
+            result.evidence_units,
+            result.knowledge_objects,
+            result.hypotheses,
+            result.investigations,
+            graph=reasoning.evidence_graph,
+            communities=reasoning.evidence_communities,
+            layer_timings=reasoning.layer_timings,
+            total_runtime_seconds=wall_elapsed,
+            dataset_memory_bytes=dataset_info.memory_usage_bytes,
+        )
+        result.provenance_trees = self._provenance_renderer.build(result)
         result.sort_findings_by_severity()
         return result

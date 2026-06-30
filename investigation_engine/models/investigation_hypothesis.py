@@ -13,6 +13,74 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class LikelyCause(BaseModel):
+    """Structured, provenance-backed explanation for a likely cause."""
+
+    cause: str = Field(..., min_length=1, description="Analyst-facing likely cause statement.")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Confidence in this likely cause.")
+    supporting_evidence: list[str] = Field(
+        default_factory=list,
+        description="EvidenceUnit IDs that explicitly support this cause.",
+    )
+    supporting_findings: list[str] = Field(
+        default_factory=list,
+        description="Finding IDs transitively supporting this cause.",
+    )
+    knowledge_objects: list[str] = Field(
+        default_factory=list,
+        description="KnowledgeObject IDs that anchor this cause semantically.",
+    )
+    contradicting_evidence: list[str] = Field(
+        default_factory=list,
+        description="EvidenceUnit IDs that weaken or complicate this cause.",
+    )
+    unknown_evidence: list[str] = Field(
+        default_factory=list,
+        description="Explicit unresolved evidence gaps relevant to this cause.",
+    )
+
+
+class EvidenceStrengthAssessment(BaseModel):
+    """Structured explanation of empirical support strength, distinct from confidence."""
+
+    rating: str = Field(..., min_length=1, description="Qualitative strength rating.")
+    supporting_evidence_units: list[str] = Field(
+        default_factory=list,
+        description="Supporting evidence unit IDs used for the strength assessment.",
+    )
+    supporting_findings: list[str] = Field(
+        default_factory=list,
+        description="Supporting finding IDs used for the strength assessment.",
+    )
+    cross_investigator_agreement: str = Field(
+        ...,
+        min_length=1,
+        description="Qualitative agreement rating across contributing investigators.",
+    )
+    contradictions: str = Field(
+        ...,
+        min_length=1,
+        description="Qualitative contradiction level for this investigation.",
+    )
+    unknown_evidence: str = Field(
+        ...,
+        min_length=1,
+        description="Qualitative unresolved-evidence level for this investigation.",
+    )
+    graph_cohesion: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Semantic cohesion score of the merged hypothesis group.",
+    )
+    community_strength: float = Field(
+        ...,
+        ge=0.0,
+        le=1.0,
+        description="Average internal strength of the supporting evidence communities.",
+    )
+
+
 class Investigation(BaseModel):
     """A higher-level investigation representing a group of fused Findings.
 
@@ -62,9 +130,17 @@ class Investigation(BaseModel):
         default_factory=list,
         description="Hypothesis IDs that produced this investigation.",
     )
+    supporting_knowledge_objects: list[str] = Field(
+        default_factory=list,
+        description="KnowledgeObject IDs supporting this investigation.",
+    )
     contradicting_evidence: list[str] = Field(
         default_factory=list,
         description="EvidenceUnit IDs that weaken or complicate this investigation.",
+    )
+    unknown_evidence: list[str] = Field(
+        default_factory=list,
+        description="Outstanding unknown evidence gaps relevant to this investigation.",
     )
     evidence_score: float = Field(
         ...,
@@ -78,6 +154,10 @@ class Investigation(BaseModel):
         le=1.0,
         description="Consolidated confidence in this finding.",
     )
+    confidence_breakdown: dict[str, float] = Field(
+        default_factory=dict,
+        description="Explainable weighted factors contributing to investigation confidence.",
+    )
     priority: float = Field(
         ...,
         ge=0.0,
@@ -88,9 +168,17 @@ class Investigation(BaseModel):
         default_factory=list,
         description="Potential root causes of the observed patterns.",
     )
+    likely_causes: list[LikelyCause] = Field(
+        default_factory=list,
+        description="Structured, provenance-backed likely causes for this investigation.",
+    )
     recommended_next_steps: list[str] = Field(
         default_factory=list,
         description="Actionable steps the analyst should take next.",
+    )
+    evidence_strength_details: EvidenceStrengthAssessment | None = Field(
+        default=None,
+        description="Structured empirical support assessment, separate from confidence.",
     )
     priority_explanation: list[str] = Field(
         default_factory=list,

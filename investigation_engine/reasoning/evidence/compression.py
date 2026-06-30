@@ -1,4 +1,4 @@
-"""Evidence compression engine."""
+"""Evidence compression engines."""
 
 from __future__ import annotations
 
@@ -6,8 +6,13 @@ from collections import defaultdict
 
 from loguru import logger
 
+from investigation_engine.config.settings import Settings
 from investigation_engine.fusion.graph import EvidenceGraph
 from investigation_engine.models.finding import Finding
+from investigation_engine.reasoning.evidence.graph_compressor import (
+    GraphCompressionArtifacts,
+    GraphBasedEvidenceCompressionEngine,
+)
 from investigation_engine.reasoning.evidence.models import EvidenceUnit
 from investigation_engine.reasoning.evidence.rules import (
     BaseEvidenceCompressionRule,
@@ -22,10 +27,11 @@ from investigation_engine.reasoning.evidence.rules import (
     RedundantFeatureGroupRule,
     SystematicMissingnessRule,
 )
+from investigation_engine.utils.deterministic import stable_datetime
 
 
-class EvidenceCompressionEngine:
-    """Compresses raw findings into a smaller set of evidence units."""
+class RuleBasedEvidenceCompressionEngine:
+    """Legacy rule-based evidence compression retained for benchmarking."""
 
     def __init__(self) -> None:
         self._graph = EvidenceGraph()
@@ -51,7 +57,7 @@ class EvidenceCompressionEngine:
         provisional = [self._compress_component(component) for component in components]
         merged = self._merge_related_evidence(provisional)
         logger.info(
-            "EvidenceCompressionEngine: compressed {} findings into {} evidence units",
+            "RuleBasedEvidenceCompressionEngine: compressed {} findings into {} evidence units",
             len(findings),
             len(merged),
         )
@@ -76,19 +82,20 @@ class EvidenceCompressionEngine:
                 continue
 
             first = units[0]
+            merged_finding_ids = sorted({
+                finding_id
+                for unit in units
+                for finding_id in unit.supporting_findings
+            })
             merged_units.append(EvidenceUnit(
                 category=category,
                 title=first.title,
                 summary=(
                     f"{first.summary} Additional related evidence units were merged so the "
-                    "reasoning "
-                    "layer reflects distinct evidence, not raw detector verbosity."
+                    "reasoning layer reflects distinct evidence, not raw detector verbosity."
                 ),
-                supporting_findings=sorted({
-                    finding_id
-                    for unit in units
-                    for finding_id in unit.supporting_findings
-                }),
+                supporting_findings=merged_finding_ids,
+                community_id=first.community_id,
                 provenance={
                     "merged_evidence_ids": [unit.evidence_id for unit in units],
                     "investigators": sorted({
@@ -96,18 +103,18 @@ class EvidenceCompressionEngine:
                         for unit in units
                         for investigator in unit.provenance.get("investigators", [])
                     }),
-                    "finding_ids": sorted({
-                        finding_id
-                        for unit in units
-                        for finding_id in unit.supporting_findings
-                    }),
+                    "finding_ids": merged_finding_ids,
                     "compression_rule": "merged_related_evidence",
                 },
                 confidence=round(max(unit.confidence for unit in units), 2),
                 strength=round(max(unit.strength for unit in units), 1),
+                community_strength=max(unit.community_strength for unit in units),
                 affected_columns=sorted({
                     column for unit in units for column in unit.affected_columns
                 }),
+                representative_columns=sorted({
+                    column for unit in units for column in unit.representative_columns
+                })[:5],
                 affected_rows=sorted({
                     row
                     for unit in units
@@ -123,6 +130,29 @@ class EvidenceCompressionEngine:
                         for module in unit.metadata.get("source_modules", [])
                     }),
                 },
+                created_at=stable_datetime(
+                    "merged_related_evidence",
+                    {
+                        "category": category,
+                        "concept_key": concept_key,
+                        "supporting_findings": merged_finding_ids,
+                    },
+                ),
             ))
 
         return sorted(merged_units, key=lambda unit: (-unit.strength, -unit.confidence, unit.title))
+
+
+class EvidenceCompressionEngine:
+    """Public evidence compression engine backed by graph-based compression."""
+
+    def __init__(self, config: Settings | None = None) -> None:
+        self._settings = config or Settings()
+        self._engine = GraphBasedEvidenceCompressionEngine(self._settings.evidence_compression)
+
+    def compress(self, findings: list[Finding]) -> list[EvidenceUnit]:
+        return self._engine.compress(findings)
+
+    def build_artifacts(self, findings: list[Finding]) -> GraphCompressionArtifacts:
+        return self._engine.build_artifacts(findings)
+

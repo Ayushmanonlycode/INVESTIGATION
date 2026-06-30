@@ -14,15 +14,15 @@ Design Principles:
 """
 
 from __future__ import annotations
-
 import uuid
+
 from datetime import datetime, timezone
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
-
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from investigation_engine.models.severity import Severity
+from investigation_engine.utils.deterministic import stable_id
 
 
 class Finding(BaseModel):
@@ -122,6 +122,30 @@ class Finding(BaseModel):
             ),
         },
     }
+
+    @model_validator(mode="before")
+    @classmethod
+    def ensure_deterministic_id(cls, data: Any) -> Any:
+        """Assign a deterministic ID when the caller does not provide one."""
+        if not isinstance(data, dict) or data.get("id"):
+            return data
+
+        payload = {
+            "module": data.get("module", ""),
+            "title": data.get("title", ""),
+            "description": data.get("description", ""),
+            "severity": (
+                data.get("severity").value
+                if hasattr(data.get("severity"), "value")
+                else str(data.get("severity", ""))
+            ),
+            "confidence": data.get("confidence", 0.0),
+            "affected_columns": sorted(data.get("affected_columns", [])),
+            "affected_rows": data.get("affected_rows") or [],
+            "evidence": data.get("evidence", {}),
+            "metadata": data.get("metadata", {}),
+        }
+        return {**data, "id": stable_id("finding", payload)}
 
     @field_validator("affected_columns")
     @classmethod

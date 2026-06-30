@@ -51,6 +51,18 @@ class EngineSettings(BaseSettings):
         default_factory=list,
         description="Module names to exclude from investigation.",
     )
+    investigation_semantic_cohesion_threshold: float = Field(
+        default=0.46,
+        ge=0.0,
+        le=1.0,
+        description="Minimum deterministic semantic cohesion required before an investigation is split.",
+    )
+    max_investigation_evidence_share: float = Field(
+        default=0.60,
+        ge=0.0,
+        le=1.0,
+        description="Maximum share of all evidence units one investigation should absorb unless strongly justified.",
+    )
 
 
 class IntegritySettings(BaseSettings):
@@ -283,6 +295,103 @@ class RelationshipSettings(BaseSettings):
     )
 
 
+class EvidenceCompressionSettings(BaseSettings):
+    """Configuration for Graph-Based Evidence Compression."""
+
+    algorithm: str = Field(
+        default="louvain",
+        description="Community detection algorithm: connected_components, louvain, greedy_modularity.",
+    )
+    edge_weight_threshold: float = Field(
+        default=0.18,
+        ge=0.0,
+        le=1.0,
+        description="Minimum edge weight required to connect two findings.",
+    )
+    structural_weight: float = Field(
+        default=0.40,
+        ge=0.0,
+        le=10.0,
+        description="Top-level weight for structural similarity.",
+    )
+    statistical_weight: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=10.0,
+        description="Top-level weight for statistical similarity.",
+    )
+    semantic_weight: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=10.0,
+        description="Top-level weight for semantic similarity.",
+    )
+    shared_columns_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    shared_rows_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    shared_metadata_weight: float = Field(default=0.15, ge=0.0, le=1.0)
+    same_investigator_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    feature_family_weight: float = Field(default=0.30, ge=0.0, le=1.0)
+    severity_similarity_weight: float = Field(default=0.15, ge=0.0, le=1.0)
+    confidence_similarity_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    numeric_evidence_similarity_weight: float = Field(default=0.75, ge=0.0, le=1.0)
+    semantic_prefix_weight: float = Field(default=0.40, ge=0.0, le=1.0)
+    semantic_token_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    semantic_domain_term_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    candidate_shared_columns: bool = Field(
+        default=True,
+        description="Generate similarity candidates from shared columns.",
+    )
+    candidate_shared_feature_family: bool = Field(
+        default=True,
+        description="Generate similarity candidates from shared feature families.",
+    )
+    candidate_shared_terms: bool = Field(
+        default=True,
+        description="Generate similarity candidates from shared semantic tokens.",
+    )
+    candidate_shared_category: bool = Field(
+        default=True,
+        description="Generate similarity candidates from shared finding categories.",
+    )
+    max_index_bucket_size: int = Field(
+        default=250,
+        ge=2,
+        description="Maximum bucket size to expand into pairwise candidate comparisons.",
+    )
+    benchmark_repeat_runs: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Number of runs used for benchmark timing summaries.",
+    )
+    louvain_resolution: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=5.0,
+        description="Resolution parameter passed to Louvain community detection.",
+    )
+    greedy_resolution: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=5.0,
+        description="Resolution parameter passed to greedy modularity detection.",
+    )
+    random_seed: int = Field(
+        default=42,
+        ge=0,
+        description="Deterministic random seed for graph algorithms that support it.",
+    )
+
+    @field_validator("algorithm")
+    @classmethod
+    def validate_algorithm(cls, value: str) -> str:
+        allowed = {"connected_components", "louvain", "greedy_modularity"}
+        normalized = value.lower()
+        if normalized not in allowed:
+            raise ValueError(f"Invalid evidence compression algorithm: {value}.")
+        return normalized
+
+
 class ThresholdSettings(BaseSettings):
     """Statistical thresholds for investigation modules.
 
@@ -441,6 +550,9 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     integrity: IntegritySettings = Field(default_factory=IntegritySettings)
     relationship: RelationshipSettings = Field(default_factory=RelationshipSettings)
+    evidence_compression: EvidenceCompressionSettings = Field(
+        default_factory=EvidenceCompressionSettings
+    )
 
     # Output
     output_dir: Path | None = Field(

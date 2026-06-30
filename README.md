@@ -1,193 +1,520 @@
-# AI Investigation Intelligence Engine (Phase 1)
+# AI Investigation Intelligence Engine
 
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
-[![Tests](https://img.shields.io/badge/tests-45%20passed-green.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-73%20passed-green.svg)](#testing-and-validation)
 [![License](https://img.shields.io/badge/license-MIT-purple.svg)](LICENSE)
 
-An autonomous, evidence-driven analytical engine designed to automate the exploratory and data-profiling phases analysts perform before decision-making. 
+The AI Investigation Intelligence Engine is an autonomous dataset-investigation system for analyst workflows. Instead of stopping at descriptive profiling, it detects structural and statistical issues, compresses redundant findings, constructs semantic knowledge objects, frames evidence-backed hypotheses, and produces a prioritized investigation queue with provenance, metrics, and analyst-readable summaries.
 
-Traditional Exploratory Data Analysis (EDA) tools (e.g., Pandas Profiling, Sweetviz, Tableau) are *descriptive*; they generate massive statistical reports but leave the task of identifying abnormalities to human experts. The **AI Investigation Intelligence Engine** shifts this paradigm by proactively discovering structural anomalies, statistical relationships, and multicollinearity, fusing them into a prioritized list of cohesive **Investigations** using a multi-layer reasoning pipeline.
+The engine is designed for deterministic, explainable investigative reasoning:
 
----
+- no LLM dependency
+- typed Pydantic v2 models
+- structured logging
+- reproducible graph-based reasoning
+- analyst-facing CLI output
+- machine-readable export paths for downstream systems
 
-## Technical Architecture & Workflow
+## What the engine does
 
-The engine functions as a unified pipeline where raw data is ingested, analyzed by domain-specific investigators, converted to atomic findings, synthesized through successive abstraction layers, and finally prioritized for analyst review.
+Given a dataset, the engine:
 
-### Architecture Flow Diagram
+1. loads and profiles the source data
+2. runs registered investigator modules
+3. emits atomic `Finding` objects
+4. compresses related findings into `EvidenceUnit` objects
+5. constructs semantic `KnowledgeObject` concepts
+6. generates evidence-backed `Hypothesis` objects
+7. prioritizes final `Investigation` queue entries
+8. renders explainability, reasoning metrics, benchmarks, and publication assets
+
+This yields a review flow that is much closer to how an analyst actually works: fewer duplicate alerts, clearer concepts, claim-style hypotheses, explicit evidence strength, likely causes with provenance, and actionable validation guidance.
+
+## Finalized reasoning pipeline
+
+The architecture is intentionally layered and stable:
 
 ```mermaid
 flowchart TD
-    %% Dataset Ingestion Layer
-    subgraph Ingestion ["1. Data Ingestion Layer"]
-        A[CSV / XLSX / PostgreSQL] -->|DatasetLoader| B[Pandas DataFrame]
-        B -->|Metadata Profiler| C[DatasetInfo & ColumnProfiles]
-    end
-
-    %% Autonomous Investigation Layer
-    subgraph Analysis ["2. Autonomous Investigation Layer"]
-        C & B -->|BaseInvestigationModule| D{Plugin Discovery Registry}
-        D -->|Register & Execute| E[Integrity Investigator]
-        D -->|Register & Execute| F[Relationship Investigator]
-    end
-
-    %% Evidence Synthesis Layer
-    subgraph reasoning ["3. Multi-Layer Reasoning Pipeline (Evidence Fusion)"]
-        E & F -->|Atomic Findings| G[1. Evidence Compression]
-        G -->|EvidenceUnits| H[2. Knowledge Construction]
-        H -->|KnowledgeObjects| I[3. Hypothesis Generation]
-        I -->|Hypotheses| J[4. Investigation Prioritizer]
-    end
-
-    %% Prioritized Output Queue
-    subgraph output ["4. Actionable Output Layer"]
-        J -->|Investigation Queue| K[Prioritized Fused Investigations]
-        K -->|CLI / JSON / Pickle| L[Analyst Dashboard / Downstream LLM]
-    end
-
-    style Ingestion fill:#f9f9f9,stroke:#333,stroke-width:1px
-    style Analysis fill:#f4f7fb,stroke:#3b5998,stroke-width:1.5px
-    style reasoning fill:#eef9f6,stroke:#00a86b,stroke-width:1.5px
-    style output fill:#fff9f0,stroke:#f0a800,stroke-width:1.5px
+    A[Dataset] --> B[Investigators]
+    B --> C[Findings]
+    C --> D[Graph-Based Evidence Compression]
+    D --> E[Evidence Units]
+    E --> F[Knowledge Objects]
+    F --> G[Hypotheses]
+    G --> H[Investigations]
+    H --> I[Explainability + Metrics + Benchmarking + Reporting]
 ```
 
----
+## Core architecture
 
-## Detailed reasoning Pipeline
+### 1. Dataset ingestion
 
-The core differentiator of the engine is its post-investigation reasoning workflow, which compresses redundant information, extracts concepts, frames hypotheses, and calculates priorities.
+Supported input paths:
 
-```mermaid
-stateDiagram-v2
-    [*] --> Finding
-    note right of Finding: Atomic anomaly flag from an Investigator (e.g. 83% nulls in neighbor_pci).
-    
-    Finding --> EvidenceUnit
-    note right of EvidenceUnit: Compresses duplicate/highly correlated findings (r=1.0) into a single analytical fact.
-    
-    EvidenceUnit --> KnowledgeObject
-    note right of KnowledgeObject: Clusters related EvidenceUnits into a reusable semantic concept (e.g. 'neighbor_cell_instability').
-    
-    KnowledgeObject --> Hypothesis
-    note right of Hypothesis: Frames an explanation or causal theory supported (and potentially contradicted) by evidence.
-    
-    Hypothesis --> Investigation
-    note right of Investigation: The finalized, prioritized queue entry complete with validation steps and causes.
-    
-    Investigation --> [*]
-```
+- CSV
+- XLSX
+- PostgreSQL connection strings
+- in-memory `pandas.DataFrame` objects via the Python API
 
-### Abstraction Layers & Data Models
+`DatasetLoader` converts the source into a DataFrame and derives dataset metadata such as row count, column count, memory footprint, and per-column profiling signals used by downstream investigators.
 
-| Layer | Model | Responsibility | Key Attributes |
-| :--- | :--- | :--- | :--- |
-| **Findings** | `Finding` | Represents raw, reproducible statistical anomalies detected directly on columns or rows. | `id`, `module`, `title`, `evidence`, `severity`, `confidence`, `affected_columns`, `metadata` |
-| **Evidence** | `EvidenceUnit` | Groups and compresses highly correlated or redundant findings (e.g., matching missingness patterns) into unified facts. | `evidence_id`, `category`, `supporting_findings`, `strength`, `provenance`, `affected_columns` |
-| **Knowledge** | `KnowledgeObject` | Synthesizes abstract semantic concepts by grouping evidence units sharing feature families or logical relationships. | `knowledge_id`, `concept`, `description`, `supporting_evidence`, `related_concepts`, `provenance` |
-| **Hypothesis** | `Hypothesis` | Constructs a falsifiable statement supported by evidence, detailing plauisble causes and validation steps. | `hypothesis_id`, `title`, `statement`, `supporting_evidence`, `contradicting_evidence`, `plausible_causes` |
-| **Investigation** | `Investigation` | The final structured reasoning container presented to the analyst, prioritized by weighted importance. | `investigation_id`, `title`, `summary`, `priority`, `recommended_next_steps`, `priority_explanation` |
+### 2. Autonomous investigators
 
----
+The engine discovers registered modules at runtime and executes all compatible investigators unless filtered by configuration or CLI options.
 
-## Autonomous Investigators
+Current built-in investigators:
 
-The engine automatically runs all investigators registered via the `@register_module` decorator. In Phase 1, two complete investigators are active:
+#### Integrity Investigator
 
-### 1. Integrity Investigator (`modules/integrity.py`)
-Responsible for assessing the structural health of the dataset. It runs 10 specific checks:
-* **Missing Value Investigation**: Identifies column null ratios and flags completely empty columns.
-* **Duplicate Row Investigation**: Performs vectorized duplicate checks, flagging exact duplicates.
-* **Duplicate Feature Investigation**: Groups columns with identical values using fast hash fingerprints and strict equality.
-* **Identifier Investigation**: Detects primary key candidates and highlights duplicates or null records in them.
-* **Constant Feature Investigation**: Detects columns with zero variance.
-* **Near-Constant Feature Investigation**: Flags columns dominated by a single value (e.g., >95% dominance).
-* **Datatype Integrity**: Identifies numeric columns stored as strings and mixed data types in string/object columns.
-* **Cardinality Investigation**: Flags columns with abnormally high or low cardinality.
-* **Missingness Relationships**: Computes correlations between column missingness patterns (e.g., columns missing together).
-* **Structural Health Score**: Computes a weighted composite score (0–100) representing structural health.
+Focuses on structural health and data-quality failures:
 
-### 2. Relationship Investigator (`modules/relationship.py`)
-Responsible for discovering statistically significant feature-to-feature and feature-to-target dependencies:
-* **Linear & Monotonic Correlations**: Computes Pearson and Spearman correlation matrices, flagging relationships exceeding thresholds.
-* **Nonlinear Dependence (Mutual Information)**: Evaluates pairwise mutual information to flag nonlinear dependencies that linear correlations miss.
-* **Target Dependency**: Detects target columns heuristically and runs classification/regression mutual information to identify predictive feature importances.
-* **Multicollinearity**: Computes Variance Inflation Factors (VIF) to flag redundant predictors that destabilize models.
-* **Feature Communities & Groups**: Uses NetworkX to cluster redundant columns and community sub-systems.
+- missing values
+- duplicate rows
+- duplicate features
+- identifier integrity
+- constant features
+- near-constant features
+- datatype integrity issues
+- abnormal cardinality
+- correlated missingness patterns
+- overall structural health scoring
 
----
+#### Relationship Investigator
 
-## Setup & Installation
+Focuses on feature-to-feature and feature-to-target relationships:
 
-The engine requires Python 3.12+.
+- Pearson correlation
+- Spearman correlation
+- mutual information
+- target dependency analysis
+- multicollinearity via VIF
+- feature communities and redundant groups
 
-```bash
-# Clone the repository
+### 3. Multi-layer reasoning
+
+The reasoning system turns many noisy findings into a smaller, analyst-usable queue.
+
+#### Findings
+
+`Finding` is the atomic anomaly object emitted directly by an investigator. It preserves:
+
+- the source module
+- severity
+- confidence
+- affected columns
+- evidence payload
+- metadata category
+
+#### Graph-Based Evidence Compression
+
+The engine builds a finding graph and links findings using structural, statistical, and semantic similarity. Community detection then compresses related findings into `EvidenceUnit` objects.
+
+This reduces review load and preserves traceability:
+
+- each evidence unit retains supporting finding IDs
+- graph cohesion and community strength remain available
+- compression is deterministic under the configured seed
+
+#### Knowledge construction
+
+`KnowledgeObject` instances convert compressed evidence into semantic concepts an analyst can interpret, such as:
+
+- Neighbor Cell Availability
+- Neighbor Cell Telemetry
+- Radio Configuration
+- Radio Signal Quality
+- Identifier Integrity
+- Feature Engineering Artifact
+
+The constructor merges duplicate semantic concepts deterministically so the output does not fragment into placeholder or repeated knowledge objects.
+
+#### Hypothesis generation
+
+`Hypothesis` objects frame claim-style analytical statements supported by evidence and knowledge. They include:
+
+- supporting evidence
+- contradicting evidence
+- unknown evidence
+- plausible causes
+- validation steps
+- confidence breakdown
+
+The hypothesis layer is designed to produce analyst-readable claims rather than generic prompts. For example:
+
+- “Neighbor-cell measurements are systematically unavailable.”
+- “Neighbor-cell telemetry is conditionally collected.”
+- “Radio-configuration parameters show little operational variation.”
+
+#### Investigation prioritization
+
+`Investigation` is the final analyst-facing queue entry. Each investigation includes:
+
+- title
+- summary
+- hypothesis
+- priority
+- confidence
+- likely causes
+- recommended next steps
+- evidence strength assessment
+- full provenance back to findings
+
+Priority is computed from evidence severity and reasoning support rather than raw finding count alone, which helps prevent noisy categories from outranking smaller but more critical issues.
+
+## Explainability and analyst experience
+
+The current engine surfaces much more than a flat list of findings.
+
+### Executive summary
+
+The CLI now renders a top-level executive summary when investigations exist, including:
+
+- number of investigations generated
+- high- and medium-priority counts
+- primary issue
+- estimated cause
+- affected feature count
+- lead confidence
+- recommended first action
+
+### Investigation dashboards
+
+Verbose and explain modes render analyst-facing investigation panels with:
+
+- summary
+- evidence strength
+- confidence
+- supporting evidence
+- knowledge objects
+- hypothesis titles
+- likely causes
+- impact
+- recommended validation
+- provenance chain
+- confidence breakdown
+- compact reasoning tree
+
+### Structured evidence strength
+
+Evidence strength is presented as derived support rather than a standalone label. The dashboard exposes:
+
+- supporting findings
+- supporting evidence units
+- contributing investigators
+- supporting knowledge objects
+- graph cohesion
+- community strength
+- overall strength rating
+
+### Provenance and lineage
+
+Every final investigation can be traced back through:
+
+- supporting hypotheses
+- supporting knowledge objects
+- supporting evidence units
+- original findings
+- contributing investigators
+
+The `--explain` workflow renders full reasoning lineage trees for detailed auditability.
+
+### Reasoning metrics
+
+The engine records explainability and compression metrics such as:
+
+- counts per reasoning layer
+- compression ratios
+- graph density
+- average community size
+- reasoning depth
+- average evidence per hypothesis
+- average knowledge per hypothesis
+- runtime per layer
+- memory metrics
+
+## Public models
+
+Important top-level models exposed by the engine:
+
+| Model | Purpose |
+| --- | --- |
+| `Finding` | Atomic investigator output |
+| `EvidenceUnit` | Compressed analytical fact built from related findings |
+| `KnowledgeObject` | Semantic concept derived from evidence |
+| `Hypothesis` | Evidence-backed analytical claim |
+| `Investigation` | Prioritized analyst-facing investigation entry |
+| `InvestigationResult` | Full run result including findings, reasoning layers, metrics, and provenance |
+
+## Installation
+
+The project requires Python 3.12 or later.
+
+```bash path=null start=null
 git clone https://github.com/username/investigation-engine.git
 cd investigation-engine
-
-# Create virtual environment and install package in editable mode with dev dependencies
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
----
-
 ## Configuration
 
-All statistical limits and severity boundaries are configured hierarchically using Pydantic Settings. Settings can be defined in a `.env` file or overridden using environment variables prefixed with `IE_`.
+The engine uses hierarchical Pydantic Settings with:
+
+1. programmatic overrides
+2. environment variables
+3. `.env`
+4. code defaults
+
+Environment variables use the `IE_` prefix and nested fields use `__`.
+
+Example:
 
 ```ini
-# Example .env Configuration
 IE_LOG_LEVEL=INFO
-IE_MAX_ROWS_SAMPLE=500000
+IE_ENGINE__MAX_ROWS_SAMPLE=500000
+IE_ENGINE__MAX_FINDINGS_PER_MODULE=50
+IE_ENGINE__INVESTIGATION_SEMANTIC_COHESION_THRESHOLD=0.46
+IE_ENGINE__MAX_INVESTIGATION_EVIDENCE_SHARE=0.60
 
-# Integrity Thresholds
 IE_INTEGRITY__MISSING_MEDIUM_THRESHOLD=0.10
 IE_INTEGRITY__NEAR_CONSTANT_DOMINANCE_THRESHOLD=0.95
 
-# Relationship Thresholds
 IE_RELATIONSHIP__PEARSON_THRESHOLD=0.80
 IE_RELATIONSHIP__VIF_HIGH_THRESHOLD=5.0
+
+IE_EVIDENCE_COMPRESSION__ALGORITHM=louvain
+IE_EVIDENCE_COMPRESSION__EDGE_WEIGHT_THRESHOLD=0.18
+IE_EVIDENCE_COMPRESSION__RANDOM_SEED=42
 ```
 
----
+Notable configurable areas:
 
-## CLI Usage
+- engine execution behavior
+- investigator thresholds
+- evidence-compression algorithm and similarity weights
+- semantic cohesion and evidence-share guardrails
+- logging
 
-The Typer-based CLI acts as the primary interface for running investigations.
+## CLI usage
 
-```bash
-# General help
+The Typer CLI is the main entry point.
+
+### General help
+
+```bash path=null start=null
 investigation-engine --help
+```
 
-# List registered investigators and settings
+### Inspect engine metadata
+
+```bash path=null start=null
 investigation-engine info
-
-# View the universal Finding JSON schema
 investigation-engine schema
-
-# Run investigation on a dataset (returns high-level summary)
-investigation-engine investigate data/data.xlsx
-
-# Run investigation with detailed tables of fused investigations and structural health
-investigation-engine investigate data/data.xlsx --verbose
-
-# Write machine-readable output results to a JSON file
-investigation-engine investigate data/data.xlsx --output results.json
 ```
 
----
+### Run an investigation
 
-## Testing
+High-level summary:
 
-Verify the mathematical logic and reasoning pipeline with the unit test suite:
-
-```bash
-pytest tests/ -v
+```bash path=null start=null
+investigation-engine investigate data/dataset.csv
 ```
-The test suite covers:
-* Plugin registration and auto-discovery.
-* Integrity validations (nulls, duplicates, constant columns, mixed types, cardinality).
-* Relationship tests (Pearson, Spearman, Mutual Information, VIF, network communities).
-* Evidence compression, concept constructor, hypothesis generators, and priority ranking.
+
+Verbose analyst dashboard:
+
+```bash path=null start=null
+investigation-engine investigate data/dataset.csv --verbose
+```
+
+Full explainability and metrics:
+
+```bash path=null start=null
+investigation-engine investigate data/dataset.csv --explain --metrics
+```
+
+Benchmark reasoning methods during the run:
+
+```bash path=null start=null
+investigation-engine investigate data/dataset.csv --benchmark
+```
+
+Run only selected modules:
+
+```bash path=null start=null
+investigation-engine investigate data/dataset.csv --modules integrity_investigator,relationship_investigator
+```
+
+Investigate PostgreSQL data:
+
+```bash path=null start=null
+investigation-engine investigate "postgresql://user:password@host:5432/dbname" --table events
+```
+
+Or:
+
+```bash path=null start=null
+investigation-engine investigate "postgresql://user:password@host:5432/dbname" --query "SELECT * FROM events LIMIT 10000"
+```
+
+Write the full run result to disk:
+
+```bash path=null start=null
+investigation-engine investigate data/dataset.csv --output result.json
+```
+
+### Standalone research/reporting commands
+
+Compression benchmark:
+
+```bash path=null start=null
+investigation-engine benchmark data/dataset.csv --output benchmark.md
+```
+
+Ablation study:
+
+```bash path=null start=null
+investigation-engine ablate data/dataset.csv --output ablation.csv
+```
+
+Dataset evaluation suite:
+
+```bash path=null start=null
+investigation-engine evaluate --output evaluation.md
+```
+
+Reasoning graph export:
+
+```bash path=null start=null
+investigation-engine visualize data/dataset.csv --graph-type evidence --output reasoning_graph.mmd
+```
+
+Publication-ready tables and assets:
+
+```bash path=null start=null
+investigation-engine paper-assets data/dataset.csv --output-dir paper_assets
+```
+
+## Output formats
+
+Depending on the command and flags, the engine can emit:
+
+- terminal dashboards via Rich
+- full JSON result payloads
+- Markdown benchmark/evaluation tables
+- CSV summaries
+- LaTeX tables
+- Mermaid graphs
+- GraphML exports
+- SVG graph exports
+- publication-asset bundles
+
+## Python API
+
+Programmatic usage is supported through `InvestigationEngine`.
+
+```python path=null start=null
+import pandas as pd
+
+from investigation_engine.config.settings import Settings
+from investigation_engine.core.engine import InvestigationEngine
+
+df = pd.read_csv("data/dataset.csv")
+
+engine = InvestigationEngine(Settings())
+result = engine.investigate_dataframe(df, name="dataset")
+
+print(result.total_findings)
+print(len(result.evidence_units))
+print(len(result.knowledge_objects))
+print(len(result.hypotheses))
+print(len(result.investigations))
+```
+
+The returned `InvestigationResult` includes:
+
+- dataset metadata
+- all module findings
+- evidence units
+- knowledge objects
+- hypotheses
+- prioritized investigations
+- module execution records
+- reasoning metrics
+- provenance trees
+- benchmark reports when requested
+
+## Determinism and validation philosophy
+
+The engine emphasizes deterministic execution:
+
+- graph compression uses deterministic settings and seed control
+- reasoning artifacts use stable IDs and stable timestamps where needed
+- repeated runs with identical inputs are expected to produce stable serialized outputs
+
+Validation includes:
+
+- investigator behavior
+- reasoning-layer construction
+- explainability rendering
+- deterministic serialization
+- benchmarking and ablation workflows
+- CLI behavior
+- visualization and paper-asset generation
+
+## Testing and validation
+
+Run the full test suite:
+
+```bash path=null start=null
+pytest
+```
+
+Current validation status:
+
+- `73 passed`
+
+Targeted reasoning-focused validation examples:
+
+```bash path=null start=null
+python -m pytest tests/test_explainable_reasoning.py tests/test_evidence_fusion.py tests/test_phase3_research_platform.py
+```
+
+Optional local quality checks:
+
+```bash path=null start=null
+ruff check .
+mypy .
+```
+
+## Repository structure
+
+High-level layout:
+
+- `investigation_engine/core/` — engine orchestration, loading, plugin discovery
+- `investigation_engine/modules/` — investigator modules
+- `investigation_engine/models/` — top-level public result models
+- `investigation_engine/fusion/` — reasoning artifact orchestration
+- `investigation_engine/reasoning/evidence/` — graph compression and evidence models
+- `investigation_engine/reasoning/knowledge/` — semantic concept construction
+- `investigation_engine/reasoning/hypothesis/` — hypothesis generation
+- `investigation_engine/reasoning/prioritization/` — investigation refinement and ranking
+- `investigation_engine/reasoning/provenance/` — lineage rendering and tracking
+- `investigation_engine/reports/` — exporters, visualizations, paper assets
+- `tests/` — regression and integration coverage
+
+## Design constraints
+
+The current system is built around these constraints:
+
+- no architecture redesign of the reasoning stages
+- no LLM dependency
+- no breaking public API changes
+- deterministic execution
+- strong analyst readability
+- explainability and provenance first
+
+## License
+
+MIT. See `LICENSE`.

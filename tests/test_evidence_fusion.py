@@ -11,6 +11,7 @@ from investigation_engine.core.engine import InvestigationEngine
 from investigation_engine.fusion.engine import EvidenceFusionEngine
 from investigation_engine.models.finding import Finding
 from investigation_engine.models.severity import Severity
+from investigation_engine.reasoning.evidence.benchmark import EvidenceCompressionBenchmark
 
 
 def _make_finding(
@@ -81,7 +82,7 @@ class TestEvidenceCompression:
         artifacts = engine.build_reasoning_artifacts(findings)
         investigation = artifacts.investigation_queue.investigations[0]
 
-        assert investigation.provenance["hypothesis_id"]
+        assert investigation.provenance["hypothesis_ids"]
         assert investigation.provenance["evidence_ids"]
         assert investigation.provenance["finding_ids"] == ["f1", "f2"]
         assert set(investigation.supporting_findings) == {"f1", "f2"}
@@ -116,28 +117,69 @@ class TestPrioritizationBiasControl:
         engine = EvidenceFusionEngine()
         investigations = engine.fuse_findings(verbose_findings + critical_findings)
 
-        by_title = {investigation.title: investigation for investigation in investigations}
-        correlation = next(
+        signal_investigation = next(
             investigation
-            for title, investigation in by_title.items()
-            if "related signal family" in title.lower()
+            for investigation in investigations
+            if investigation.metadata.get("workstream") != "record_linkage"
         )
         identifier = next(
             investigation
-            for title, investigation in by_title.items()
-            if "record linkage" in title.lower() or "identifier" in title.lower()
+            for investigation in investigations
+            if investigation.metadata.get("workstream") == "record_linkage"
         )
 
-        assert identifier.priority >= correlation.priority
-        assert identifier.evidence_score >= correlation.evidence_score
+        assert identifier.priority >= signal_investigation.priority
+        assert identifier.evidence_score >= signal_investigation.evidence_score
 
 
 class TestReasoningArtifacts:
     def test_builds_evidence_knowledge_hypothesis_and_investigations(self):
         findings = [
-            _make_finding("f1", "Constant a", "constant_features", ["a"], Severity.HIGH),
-            _make_finding("f2", "Low-cardinality a", "cardinality", ["a"], Severity.MEDIUM),
-            _make_finding("f3", "Duplicate id", "identifiers", ["record_id"], Severity.HIGH),
+            _make_finding(
+                "f1",
+                "Neighbor missing a",
+                "missing_values",
+                ["neighbor1_rsrp", "neighbor1_rsrq"],
+                Severity.HIGH,
+                module="relationship_investigator",
+            ),
+            _make_finding(
+                "f2",
+                "Neighbor missing relation",
+                "missingness_relationships",
+                ["neighbor1_rsrp", "neighbor1_sinr"],
+                Severity.MEDIUM,
+                module="relationship_investigator",
+            ),
+            _make_finding(
+                "f3",
+                "Radio correlation",
+                "pearson_correlation",
+                ["neighbor1_rsrp", "neighbor1_sinr"],
+                Severity.MEDIUM,
+                module="relationship_investigator",
+            ),
+            _make_finding(
+                "f4",
+                "Neighbor duplicate",
+                "duplicate_features",
+                ["neighbor1_rsrp", "neighbor1_rsrq"],
+                Severity.MEDIUM,
+            ),
+            _make_finding(
+                "f5",
+                "Config constant",
+                "constant_features",
+                ["window_size"],
+                Severity.HIGH,
+            ),
+            _make_finding(
+                "f6",
+                "Config low cardinality",
+                "cardinality",
+                ["window_size"],
+                Severity.MEDIUM,
+            ),
         ]
 
         engine = EvidenceFusionEngine()
@@ -147,9 +189,49 @@ class TestReasoningArtifacts:
         assert artifacts.knowledge_objects
         assert artifacts.hypotheses
         assert artifacts.investigation_queue.investigations
+        assert len(artifacts.knowledge_objects) <= len(artifacts.evidence_units)
+        assert len(artifacts.hypotheses) <= len(artifacts.knowledge_objects)
+        assert len(artifacts.investigation_queue.investigations) <= len(artifacts.hypotheses)
         assert all(hypothesis.supporting_evidence for hypothesis in artifacts.hypotheses)
         assert all(
             investigation.priority_explanation
+            for investigation in artifacts.investigation_queue.investigations
+        )
+        assert all(
+            investigation.evidence_strength_details is not None
+            for investigation in artifacts.investigation_queue.investigations
+        )
+        assert all(
+            cause.supporting_evidence
+            for investigation in artifacts.investigation_queue.investigations
+            for cause in investigation.likely_causes
+        )
+        assert any(
+            knowledge.concept == "Neighbor Cell Availability"
+            for knowledge in artifacts.knowledge_objects
+        )
+        assert all(
+            "Into Context" not in knowledge.concept
+            for knowledge in artifacts.knowledge_objects
+        )
+        assert len({knowledge.concept for knowledge in artifacts.knowledge_objects}) == len(
+            artifacts.knowledge_objects
+        )
+        assert any(
+            hypothesis.title == "Neighbor-cell measurements are systematically unavailable."
+            for hypothesis in artifacts.hypotheses
+        )
+        assert all(
+            "deserve investigation" not in hypothesis.title.lower()
+            for hypothesis in artifacts.hypotheses
+        )
+        assert any(
+            investigation.title in {
+                "Systematic Neighbor Cell Measurement Loss",
+                "Conditional Neighbor Cell Collection",
+                "Constant Configuration Parameter",
+                "Record Linkage Integrity Risk",
+            }
             for investigation in artifacts.investigation_queue.investigations
         )
 
@@ -179,3 +261,56 @@ class TestEngineIntegration:
         assert result.hypotheses
         assert result.investigations
         assert "reasoning_summary" in result.metadata
+
+
+class TestReasoningMetrics:
+    def test_benchmark_exposes_reasoning_compression_metrics(self):
+        findings = [
+            _make_finding(
+                "f1",
+                "Neighbor missing",
+                "missing_values",
+                ["neighbor1_rsrp", "neighbor1_rsrq"],
+                Severity.HIGH,
+                module="relationship_investigator",
+            ),
+            _make_finding(
+                "f2",
+                "Neighbor missingness",
+                "missingness_relationships",
+                ["neighbor1_rsrp", "neighbor1_sinr"],
+                Severity.MEDIUM,
+                module="relationship_investigator",
+            ),
+            _make_finding(
+                "f3",
+                "Neighbor correlation",
+                "pearson_correlation",
+                ["neighbor1_rsrp", "neighbor1_sinr"],
+                Severity.MEDIUM,
+                module="relationship_investigator",
+            ),
+            _make_finding(
+                "f4",
+                "Config constant",
+                "constant_features",
+                ["window_size"],
+                Severity.HIGH,
+            ),
+        ]
+        artifacts = EvidenceFusionEngine().build_reasoning_artifacts(findings)
+        benchmark = EvidenceCompressionBenchmark(Settings().evidence_compression)
+        metrics = benchmark.reasoning_metrics(
+            findings,
+            artifacts.evidence_units,
+            artifacts.knowledge_objects,
+            artifacts.hypotheses,
+            artifacts.investigation_queue.investigations,
+        )
+
+        assert metrics.semantic_compression_ratio > 0.0
+        assert metrics.knowledge_reduction_ratio <= 1.0
+        assert metrics.hypothesis_compression_ratio <= 1.0
+        assert metrics.investigation_compression_ratio <= 1.0
+        assert metrics.reasoning_depth == 4
+        assert metrics.average_provenance_length > 0.0
