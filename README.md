@@ -604,7 +604,9 @@ amount_findings = result.findings_for_column("amount")
 | `provenance_trees` | Rendered lineage |
 | `benchmark_reports` | Optional comparisons |
 
-## Configuration
+# Configuration
+
+The framework uses hierarchical **Pydantic Settings**.
 
 Priority: programmatic overrides, environment variables, `.env`, then defaults. Variables use
 `IE_`, are case-insensitive, and use `__` between nested groups.
@@ -801,7 +803,7 @@ Failure behavior:
 Modules currently execute sequentially. `parallel_modules` is experimental and is not distributed
 execution.
 
-## Testing
+# Testing
 
 ```bash
 pytest
