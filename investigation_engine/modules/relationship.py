@@ -6,15 +6,20 @@ and turns them into analyst-facing findings rather than raw statistics.
 
 from __future__ import annotations
 
+import math
+import time
 from itertools import combinations
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal, cast
 
-import networkx as nx
+import networkx as nx  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd
 from loguru import logger
-from scipy import stats as scipy_stats
-from sklearn.feature_selection import mutual_info_classif, mutual_info_regression
+from scipy import stats as scipy_stats  # type: ignore[import-untyped]
+from sklearn.feature_selection import (  # type: ignore[import-untyped]
+    mutual_info_classif,
+    mutual_info_regression,
+)
 
 from investigation_engine.config.settings import RelationshipSettings, Settings
 from investigation_engine.core.plugin import register_module
@@ -75,34 +80,57 @@ class RelationshipInvestigator(BaseInvestigationModule):
     ) -> list[Finding]:
         cfg = config.relationship
         findings: list[Finding] = []
+        profiles = {profile.name: profile for profile in dataset_info.columns}
 
         numeric_columns = [
-            col for col in dataset_info.numeric_columns
-            if pd.api.types.is_numeric_dtype(df[col]) and df[col].nunique(dropna=True) > 1
+            col
+            for col in dataset_info.numeric_columns
+            if (
+                col in df.columns
+                and pd.api.types.is_numeric_dtype(df[col])
+                and profiles[col].unique_count > 1
+            )
         ]
         if len(numeric_columns) < 2:
             return findings
 
-        numeric_df = df[numeric_columns].apply(pd.to_numeric, errors="coerce")
-
+        # All selected columns are already known to be numeric, so coercion is unnecessary.
+        numeric_df = df.loc[:, numeric_columns]
         pair_metrics: dict[tuple[str, str], dict[str, Any]] = {}
+        full_analysis = config.engine.analysis_profile == "full"
 
         investigations = [
-            ("pearson", self._investigate_correlations),
+            ("correlations", self._investigate_correlations),
             ("mutual_information", self._investigate_mutual_information),
             ("multicollinearity", self._investigate_multicollinearity),
             ("groups", self._investigate_feature_groups),
         ]
 
         for domain_name, method in investigations:
+            domain_start = time.perf_counter()
             try:
-                findings.extend(method(numeric_df, df, dataset_info, cfg, pair_metrics))
+                findings.extend(
+                    method(
+                        numeric_df,
+                        df,
+                        dataset_info,
+                        cfg,
+                        pair_metrics,
+                        full_analysis,
+                    )
+                )
             except Exception as exc:
                 logger.error(
                     "Relationship/{} failed: {}",
                     domain_name,
                     exc,
                     exc_info=True,
+                )
+            finally:
+                logger.info(
+                    "Relationship/{} completed in {:.3f}s",
+                    domain_name,
+                    time.perf_counter() - domain_start,
                 )
 
         findings = self._cap_findings(findings, config.engine.max_findings_per_module)
@@ -115,16 +143,29 @@ class RelationshipInvestigator(BaseInvestigationModule):
         dataset_info: DatasetInfo,
         cfg: RelationshipSettings,
         pair_metrics: dict[tuple[str, str], dict[str, Any]],
+        full_analysis: bool,
     ) -> list[Finding]:
         findings: list[Finding] = []
 
-        for method, threshold in (
-            ("pearson", cfg.pearson_threshold),
-            ("spearman", cfg.spearman_threshold),
+        for method, threshold, balanced_max_rows in (
+            ("pearson", cfg.pearson_threshold, cfg.pearson_max_rows),
+            ("spearman", cfg.spearman_threshold, cfg.spearman_max_rows),
         ):
-            corr_matrix = numeric_df.corr(method=method, min_periods=cfg.min_pair_observations)
-            for left, right, coefficient in self._iter_flagged_pairs(corr_matrix, threshold):
-                key = tuple(sorted((left, right)))
+            analysis_df = self._sample_rows(
+                numeric_df,
+                None if full_analysis else balanced_max_rows,
+            )
+            correlation_method = cast(Literal["pearson", "spearman"], method)
+            corr_matrix = analysis_df.corr(
+                method=correlation_method,
+                min_periods=cfg.min_pair_observations,
+            )
+            flagged_pairs = self._iter_flagged_pairs(corr_matrix, threshold)
+
+            # Retain every strong edge for group discovery without performing
+            # another row scan or constructing an individual finding for each.
+            for left, right, coefficient in flagged_pairs:
+                key = self._pair_key(left, right)
                 metrics = pair_metrics.setdefault(key, self._base_pair_metrics(cfg))
                 metrics[f"{method}_correlation"] = coefficient
                 if metrics["correlation_coefficient"] is None or abs(coefficient) > abs(
@@ -132,7 +173,15 @@ class RelationshipInvestigator(BaseInvestigationModule):
                 ):
                     metrics["correlation_coefficient"] = coefficient
 
-                pair_df = numeric_df[[left, right]].dropna()
+            candidates = (
+                flagged_pairs
+                if full_analysis
+                else flagged_pairs[: cfg.max_correlation_candidates_per_method]
+            )
+            for left, right, coefficient in candidates:
+                key = self._pair_key(left, right)
+                metrics = pair_metrics[key]
+                pair_df = analysis_df.loc[:, [left, right]].dropna()
                 if len(pair_df) < cfg.min_pair_observations:
                     continue
 
@@ -168,6 +217,9 @@ class RelationshipInvestigator(BaseInvestigationModule):
                         "pair": [left, right],
                         "method": method,
                         "observations": len(pair_df),
+                        "analysis_rows": len(analysis_df),
+                        "total_rows": len(numeric_df),
+                        "sampled": len(analysis_df) < len(numeric_df),
                     },
                     severity=severity,
                     confidence=1.0 if p_value is not None and p_value <= 0.001 else 0.9,
@@ -185,6 +237,14 @@ class RelationshipInvestigator(BaseInvestigationModule):
                     },
                 ))
 
+            logger.info(
+                "Relationship/{} scan: {} rows, {} strong pairs, {} tested candidates",
+                method,
+                len(analysis_df),
+                len(flagged_pairs),
+                len(candidates),
+            )
+
         return findings
 
     def _investigate_mutual_information(
@@ -194,37 +254,59 @@ class RelationshipInvestigator(BaseInvestigationModule):
         dataset_info: DatasetInfo,
         cfg: RelationshipSettings,
         pair_metrics: dict[tuple[str, str], dict[str, Any]],
+        full_analysis: bool,
     ) -> list[Finding]:
         findings: list[Finding] = []
 
         target_column = self._find_target_column(df, dataset_info, cfg)
         if target_column is not None:
-            target_findings = self._investigate_target_mutual_information(
-                numeric_df,
-                df[target_column],
-                target_column,
-                cfg,
+            findings.extend(
+                self._investigate_target_mutual_information(
+                    numeric_df,
+                    df[target_column],
+                    target_column,
+                    cfg,
+                )
             )
-            findings.extend(target_findings)
+            if not full_analysis:
+                return findings
 
-        candidate_columns = numeric_df.columns[: cfg.mi_max_columns]
-        sample_df = numeric_df.loc[:, candidate_columns].dropna()
-        if sample_df.empty:
+        sample_df = self._sample_rows(numeric_df, cfg.mi_max_rows)
+        coverage = sample_df.notna().sum()
+        variability = sample_df.nunique(dropna=True)
+        ranked_columns = sorted(
+            sample_df.columns,
+            key=lambda column: (
+                int(coverage[column]),
+                int(variability[column]),
+                str(column),
+            ),
+            reverse=True,
+        )[: cfg.mi_max_columns]
+
+        if not full_analysis:
+            max_columns = self._max_columns_for_pair_budget(cfg.mi_max_pairs)
+            ranked_columns = ranked_columns[:max_columns]
+
+        candidate_pairs = list(combinations(ranked_columns, 2))
+        if not candidate_pairs:
             return findings
 
-        if len(sample_df) > cfg.mi_max_rows:
-            sample_df = sample_df.sample(n=cfg.mi_max_rows, random_state=42)
+        for left, right in candidate_pairs:
+            pair_df = sample_df.loc[:, [left, right]].dropna()
+            if len(pair_df) < cfg.min_pair_observations:
+                continue
 
-        for left, right in combinations(sample_df.columns, 2):
             mi_score = self._estimate_pairwise_mutual_information(
-                sample_df[left].to_numpy(dtype=np.float64),
-                sample_df[right].to_numpy(dtype=np.float64),
+                pair_df[left].to_numpy(dtype=np.float64),
+                pair_df[right].to_numpy(dtype=np.float64),
                 cfg,
+                symmetric=full_analysis,
             )
             if mi_score < cfg.mutual_information_threshold:
                 continue
 
-            key = tuple(sorted((left, right)))
+            key = self._pair_key(left, right)
             metrics = pair_metrics.setdefault(key, self._base_pair_metrics(cfg))
             metrics["mutual_information_score"] = mi_score
 
@@ -254,7 +336,11 @@ class RelationshipInvestigator(BaseInvestigationModule):
                     **metrics,
                     "pair": [left, right],
                     "method": "mutual_information",
-                    "observations": len(sample_df),
+                    "observations": len(pair_df),
+                    "analysis_rows": len(sample_df),
+                    "total_rows": len(numeric_df),
+                    "sampled": len(sample_df) < len(numeric_df),
+                    "symmetric_estimate": full_analysis,
                 },
                 severity=severity,
                 confidence=0.8,
@@ -271,6 +357,12 @@ class RelationshipInvestigator(BaseInvestigationModule):
                 },
             ))
 
+        logger.info(
+            "Relationship/mutual_information scan: {} rows, {} columns, {} pairs",
+            len(sample_df),
+            len(ranked_columns),
+            len(candidate_pairs),
+        )
         return findings
 
     def _investigate_target_mutual_information(
@@ -280,48 +372,63 @@ class RelationshipInvestigator(BaseInvestigationModule):
         target_column: str,
         cfg: RelationshipSettings,
     ) -> list[Finding]:
-        joined = numeric_df.join(target.rename(target_column)).dropna()
-        if len(joined) < cfg.min_pair_observations:
+        target_non_null = target.dropna()
+        if len(target_non_null) < cfg.min_pair_observations:
             return []
-
-        feature_matrix = joined[numeric_df.columns]
-        target_series = joined[target_column]
 
         is_classification_target = (
-            pd.api.types.is_bool_dtype(target_series)
-            or not pd.api.types.is_numeric_dtype(target_series)
-            or target_series.nunique(dropna=True) <= 10
+            pd.api.types.is_bool_dtype(target_non_null)
+            or not pd.api.types.is_numeric_dtype(target_non_null)
+            or target_non_null.nunique(dropna=True) <= 10
         )
 
-        if is_classification_target:
-            target_values = pd.Categorical(target_series).codes
-            mi_scores = mutual_info_classif(
-                feature_matrix,
-                target_values,
-                discrete_features=False,
-                n_neighbors=cfg.mi_n_neighbors,
-                random_state=42,
-            )
-        else:
-            mi_scores = mutual_info_regression(
-                feature_matrix,
-                target_series.to_numpy(dtype=np.float64),
-                discrete_features=False,
-                n_neighbors=cfg.mi_n_neighbors,
-                random_state=42,
-            )
+        scored_features: list[tuple[str, float, int]] = []
+        feature_columns = [
+            column
+            for column in numeric_df.columns
+            if column != target_column
+        ][: cfg.mi_max_columns]
 
-        strong_features = [
-            (column, float(score))
-            for column, score in zip(feature_matrix.columns, mi_scores, strict=False)
-            if float(score) >= cfg.mutual_information_threshold
-        ]
-        if not strong_features:
+        for column in feature_columns:
+            pair_df = pd.concat(
+                [
+                    numeric_df[column].rename("__feature"),
+                    target.rename("__target"),
+                ],
+                axis=1,
+            ).dropna()
+            if len(pair_df) < cfg.min_pair_observations:
+                continue
+            pair_df = self._sample_rows(pair_df, cfg.mi_max_rows)
+
+            feature_values = pair_df["__feature"].to_numpy(dtype=np.float64).reshape(-1, 1)
+            if is_classification_target:
+                target_values = pd.Categorical(pair_df["__target"]).codes
+                score = mutual_info_classif(
+                    feature_values,
+                    target_values,
+                    discrete_features=False,
+                    n_neighbors=cfg.mi_n_neighbors,
+                    random_state=42,
+                )[0]
+            else:
+                score = mutual_info_regression(
+                    feature_values,
+                    pair_df["__target"].to_numpy(dtype=np.float64),
+                    discrete_features=False,
+                    n_neighbors=cfg.mi_n_neighbors,
+                    random_state=42,
+                )[0]
+
+            if float(score) >= cfg.mutual_information_threshold:
+                scored_features.append((str(column), float(score), len(pair_df)))
+
+        if not scored_features:
             return []
 
-        strong_features.sort(key=lambda item: item[1], reverse=True)
-        top_features = strong_features[: min(10, len(strong_features))]
-        best_feature, best_score = top_features[0]
+        scored_features.sort(key=lambda item: item[1], reverse=True)
+        top_features = scored_features[: min(10, len(scored_features))]
+        best_feature, best_score, best_observations = top_features[0]
 
         return [Finding(
             module=self.name,
@@ -339,7 +446,12 @@ class RelationshipInvestigator(BaseInvestigationModule):
                 "vif": None,
                 "thresholds": self._thresholds_dict(cfg),
                 "target_column": target_column,
-                "top_features": top_features,
+                "top_features": [
+                    (name, score) for name, score, _observations in top_features
+                ],
+                "observations": best_observations,
+                "total_rows": len(target),
+                "sampled": best_observations < len(target_non_null),
             },
             severity=_severity_from_strength(
                 best_score,
@@ -351,7 +463,10 @@ class RelationshipInvestigator(BaseInvestigationModule):
                 "Prioritize these features for target leakage review, interpretation, and model "
                 "selection work before relying on them in downstream analysis."
             ),
-            affected_columns=[target_column, *[name for name, _ in top_features]],
+            affected_columns=[
+                target_column,
+                *[name for name, _score, _observations in top_features],
+            ],
             metadata={
                 "category": "target_mutual_information",
                 "anomaly_strength": best_score,
@@ -366,8 +481,13 @@ class RelationshipInvestigator(BaseInvestigationModule):
         dataset_info: DatasetInfo,
         cfg: RelationshipSettings,
         pair_metrics: dict[tuple[str, str], dict[str, Any]],
+        full_analysis: bool,
     ) -> list[Finding]:
-        vif_scores = self._compute_vif_scores(numeric_df)
+        vif_df = self._sample_rows(
+            numeric_df,
+            None if full_analysis else cfg.vif_max_rows,
+        )
+        vif_scores = self._compute_vif_scores(vif_df)
         findings: list[Finding] = []
 
         for column, vif in vif_scores.items():
@@ -392,6 +512,9 @@ class RelationshipInvestigator(BaseInvestigationModule):
                     "vif": vif,
                     "thresholds": self._thresholds_dict(cfg),
                     "top_vif_scores": vif_scores,
+                    "analysis_rows": len(vif_df),
+                    "total_rows": len(numeric_df),
+                    "sampled": len(vif_df) < len(numeric_df),
                 },
                 severity=severity,
                 confidence=0.95,
@@ -416,7 +539,9 @@ class RelationshipInvestigator(BaseInvestigationModule):
         dataset_info: DatasetInfo,
         cfg: RelationshipSettings,
         pair_metrics: dict[tuple[str, str], dict[str, Any]],
+        full_analysis: bool,
     ) -> list[Finding]:
+        del df, dataset_info, full_analysis
         findings: list[Finding] = []
         redundancy_graph = nx.Graph()
         strong_group_graph = nx.Graph()
@@ -520,7 +645,7 @@ class RelationshipInvestigator(BaseInvestigationModule):
             best_mi: float | None = None
 
             for left, right in combinations(columns, 2):
-                metrics = pair_metrics.get(tuple(sorted((left, right))))
+                metrics = pair_metrics.get(self._pair_key(left, right))
                 if metrics is None:
                     continue
                 pair_details.append({
@@ -585,6 +710,8 @@ class RelationshipInvestigator(BaseInvestigationModule):
         x: np.ndarray,
         y: np.ndarray,
         cfg: RelationshipSettings,
+        *,
+        symmetric: bool,
     ) -> float:
         mi_xy = mutual_info_regression(
             x.reshape(-1, 1),
@@ -593,6 +720,9 @@ class RelationshipInvestigator(BaseInvestigationModule):
             n_neighbors=cfg.mi_n_neighbors,
             random_state=42,
         )[0]
+        if not symmetric:
+            return float(mi_xy)
+
         mi_yx = mutual_info_regression(
             y.reshape(-1, 1),
             x,
@@ -601,6 +731,23 @@ class RelationshipInvestigator(BaseInvestigationModule):
             random_state=42,
         )[0]
         return float((float(mi_xy) + float(mi_yx)) / 2.0)
+
+    @staticmethod
+    def _pair_key(left: str, right: str) -> tuple[str, str]:
+        return (left, right) if left <= right else (right, left)
+
+    @staticmethod
+    def _sample_rows(df: pd.DataFrame, maximum: int | None) -> pd.DataFrame:
+        if maximum is None or len(df) <= maximum:
+            return df
+        return df.sample(n=maximum, random_state=42)
+
+    @staticmethod
+    def _max_columns_for_pair_budget(maximum_pairs: int) -> int:
+        columns = max(2, (1 + math.isqrt(1 + 8 * maximum_pairs)) // 2)
+        while columns * (columns - 1) // 2 > maximum_pairs:
+            columns -= 1
+        return columns
 
     def _compute_vif_scores(self, numeric_df: pd.DataFrame) -> dict[str, float]:
         vif_df = numeric_df.copy()

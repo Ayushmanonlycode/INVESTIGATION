@@ -31,8 +31,10 @@ Design:
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, ClassVar
 
+import networkx as nx  # type: ignore[import-untyped]
 import numpy as np
 import pandas as pd
 from loguru import logger
@@ -135,6 +137,18 @@ class IntegrityInvestigator(BaseInvestigationModule):
 
         # Each investigation domain is isolated — one crash does not
         # affect others.
+        def investigate_missingness(
+            frame: pd.DataFrame,
+            info: DatasetInfo,
+            settings: IntegritySettings,
+        ) -> list[Finding]:
+            return self._investigate_missingness_relationships(
+                frame,
+                info,
+                settings,
+                full_analysis=config.engine.analysis_profile == "full",
+            )
+
         investigations = [
             ("missing_values", self._investigate_missing_values),
             ("duplicate_rows", self._investigate_duplicate_rows),
@@ -144,26 +158,28 @@ class IntegrityInvestigator(BaseInvestigationModule):
             ("near_constant_features", self._investigate_near_constant_features),
             ("datatype_integrity", self._investigate_datatype_integrity),
             ("cardinality", self._investigate_cardinality),
-            ("missingness_relationships", self._investigate_missingness_relationships),
+            ("missingness_relationships", investigate_missingness),
         ]
 
         domain_scores: dict[str, float] = {}
 
         for domain_name, method in investigations:
+            domain_start = time.perf_counter()
             try:
                 domain_findings = method(df, dataset_info, cfg)
                 findings.extend(domain_findings)
-                # Track domain health for structural score
                 domain_scores[domain_name] = self._compute_domain_score(domain_findings)
-                logger.debug(
-                    "Integrity/{}: {} findings",
+                logger.info(
+                    "Integrity/{} completed: {} findings in {:.3f}s",
                     domain_name,
                     len(domain_findings),
+                    time.perf_counter() - domain_start,
                 )
             except Exception as e:
                 logger.error(
-                    "Integrity/{} failed: {}",
+                    "Integrity/{} failed after {:.3f}s: {}",
                     domain_name,
+                    time.perf_counter() - domain_start,
                     e,
                     exc_info=True,
                 )
@@ -193,8 +209,14 @@ class IntegrityInvestigator(BaseInvestigationModule):
         if n_rows == 0:
             return findings
 
-        # Vectorized null computation across all columns
-        null_counts: pd.Series = df.isnull().sum()
+        profiles = {profile.name: profile for profile in dataset_info.columns}
+        null_counts = pd.Series(
+            {
+                column: profiles[str(column)].null_count
+                for column in df.columns
+            },
+            dtype="int64",
+        )
         null_ratios: pd.Series = null_counts / n_rows
 
         # ── Completely empty columns ─────────────────────────────────
@@ -296,12 +318,13 @@ class IntegrityInvestigator(BaseInvestigationModule):
         if n_rows < 2:
             return findings
 
-        dup_mask = df.duplicated(keep="first")
-        dup_count = int(dup_mask.sum())
+        dup_count = dataset_info.duplicate_row_count
         dup_ratio = dup_count / n_rows
 
         if dup_ratio < cfg.duplicate_low_threshold:
             return findings
+
+        dup_mask = df.duplicated(keep="first")
 
         severity = _severity_from_ratio(
             dup_ratio,
@@ -361,49 +384,35 @@ class IntegrityInvestigator(BaseInvestigationModule):
         dataset_info: DatasetInfo,
         cfg: IntegritySettings,
     ) -> list[Finding]:
-        """Detect columns with identical values (redundant features)."""
+        """Detect columns with identical values using bounded hash fingerprints."""
+        del dataset_info, cfg
         findings: list[Finding] = []
         columns = list(df.columns)
         n_cols = len(columns)
-
         if n_cols < 2:
             return findings
 
-        # Build hash fingerprints for fast comparison
-        col_hashes: dict[str, int] = {}
-        for col in columns:
-            try:
-                col_hashes[col] = hash(df[col].astype(str).str.cat())
-            except Exception:
-                col_hashes[col] = hash(str(df[col].tolist()))
+        hash_groups: dict[tuple[int, int, int], list[str]] = {}
+        for column in columns:
+            fingerprint = self._column_fingerprint(df[column])
+            hash_groups.setdefault(fingerprint, []).append(str(column))
 
-        # Group columns by hash
-        hash_groups: dict[int, list[str]] = {}
-        for col, h in col_hashes.items():
-            hash_groups.setdefault(h, []).append(col)
-
-        # For hash collisions, verify with actual equality
         duplicate_groups: list[list[str]] = []
-        for _h, group in hash_groups.items():
+        for group in hash_groups.values():
             if len(group) < 2:
                 continue
-            # Verify actual equality for each pair
-            verified: list[list[str]] = []
             used: set[str] = set()
-            for i in range(len(group)):
-                if group[i] in used:
+            for index, left in enumerate(group):
+                if left in used:
                     continue
-                equiv = [group[i]]
-                for j in range(i + 1, len(group)):
-                    if group[j] in used:
-                        continue
-                    if df[group[i]].equals(df[group[j]]):
-                        equiv.append(group[j])
-                        used.add(group[j])
-                if len(equiv) > 1:
-                    verified.append(equiv)
-                    used.add(group[i])
-            duplicate_groups.extend(verified)
+                equivalent = [left]
+                for right in group[index + 1:]:
+                    if right not in used and df[left].equals(df[right]):
+                        equivalent.append(right)
+                        used.add(right)
+                if len(equivalent) > 1:
+                    duplicate_groups.append(equivalent)
+                    used.add(left)
 
         for group in duplicate_groups:
             findings.append(Finding(
@@ -436,9 +445,18 @@ class IntegrityInvestigator(BaseInvestigationModule):
 
         return findings
 
-    # ══════════════════════════════════════════════════════════════════
-    #  4. IDENTIFIER INVESTIGATION
-    # ══════════════════════════════════════════════════════════════════
+    @staticmethod
+    def _column_fingerprint(series: pd.Series) -> tuple[int, int, int]:
+        hashes = pd.util.hash_pandas_object(
+            series,
+            index=False,
+            categorize=True,
+        ).to_numpy(dtype=np.uint64, copy=False)
+        if len(hashes) == 0:
+            return (0, 0, 0)
+        xor_value = np.bitwise_xor.reduce(hashes)
+        sum_value = hashes.sum(dtype=np.uint64)
+        return (len(hashes), int(xor_value), int(sum_value))
 
     def _investigate_identifiers(
         self,
@@ -452,12 +470,13 @@ class IntegrityInvestigator(BaseInvestigationModule):
         if n_rows == 0:
             return findings
 
-        id_candidates = self._detect_id_columns(df, cfg)
+        profiles = {profile.name: profile for profile in dataset_info.columns}
+        id_candidates = self._detect_id_columns(df, cfg, dataset_info)
 
         for col in id_candidates:
-            series = df[col]
-            null_count = int(series.isnull().sum())
-            unique_count = int(series.nunique())
+            profile = profiles[col]
+            null_count = profile.null_count
+            unique_count = profile.unique_count
             total_non_null = n_rows - null_count
             duplicate_count = total_non_null - unique_count if total_non_null > unique_count else 0
 
@@ -525,10 +544,12 @@ class IntegrityInvestigator(BaseInvestigationModule):
         self,
         df: pd.DataFrame,
         cfg: IntegritySettings,
+        dataset_info: DatasetInfo,
     ) -> list[str]:
         """Heuristically detect columns that are likely identifiers."""
         candidates: list[str] = []
         n_rows = len(df)
+        profiles = {profile.name: profile for profile in dataset_info.columns}
 
         for col in df.columns:
             col_lower = str(col).lower().replace("_", "").replace("-", "").replace(" ", "")
@@ -540,7 +561,7 @@ class IntegrityInvestigator(BaseInvestigationModule):
             )
 
             # Uniqueness-based detection
-            unique_ratio = df[col].nunique() / n_rows if n_rows > 0 else 0
+            unique_ratio = profiles[str(col)].unique_count / n_rows if n_rows > 0 else 0
             uniqueness_match = unique_ratio >= cfg.id_uniqueness_threshold
 
             # Both name and uniqueness, or strong name match with decent uniqueness
@@ -568,8 +589,11 @@ class IntegrityInvestigator(BaseInvestigationModule):
         if n_rows == 0:
             return findings
 
-        nunique = df.nunique()
-        constant_cols = nunique[nunique <= 1].index.tolist()
+        constant_cols = [
+            profile.name
+            for profile in dataset_info.columns
+            if profile.unique_count <= 1
+        ]
 
         for col in constant_cols:
             non_null = df[col].dropna()
@@ -623,9 +647,12 @@ class IntegrityInvestigator(BaseInvestigationModule):
         if n_rows == 0:
             return findings
 
-        # Skip columns already flagged as constant (unique count <= 1)
-        nunique = df.nunique()
-        constant_cols = set(nunique[nunique <= 1].index)
+        profiles = {profile.name: profile for profile in dataset_info.columns}
+        constant_cols = {
+            profile.name
+            for profile in dataset_info.columns
+            if profile.unique_count <= 1
+        }
 
         for col in df.columns:
             if col in constant_cols:
@@ -665,7 +692,7 @@ class IntegrityInvestigator(BaseInvestigationModule):
                     "dominance_ratio": round(dominance, 4),
                     "dominant_count": top_count,
                     "minority_count": minority_count,
-                    "unique_count": int(nunique[col]),
+                    "unique_count": profiles[str(col)].unique_count,
                     "total_non_null": len(non_null),
                     "threshold": cfg.near_constant_dominance_threshold,
                 },
@@ -882,14 +909,15 @@ class IntegrityInvestigator(BaseInvestigationModule):
         if n_rows == 0:
             return findings
 
-        id_candidates = set(self._detect_id_columns(df, cfg))
+        profiles = {profile.name: profile for profile in dataset_info.columns}
+        id_candidates = set(self._detect_id_columns(df, cfg, dataset_info))
 
         for col in df.columns:
             non_null = df[col].dropna()
             if len(non_null) == 0:
                 continue
 
-            unique_count = int(non_null.nunique())
+            unique_count = profiles[str(col)].unique_count
             unique_ratio = unique_count / len(non_null)
             dtype = df[col].dtype
 
@@ -985,94 +1013,129 @@ class IntegrityInvestigator(BaseInvestigationModule):
         df: pd.DataFrame,
         dataset_info: DatasetInfo,
         cfg: IntegritySettings,
+        *,
+        full_analysis: bool = False,
     ) -> list[Finding]:
-        """Detect columns that are frequently missing together."""
-        findings: list[Finding] = []
+        """Detect connected groups of columns that are frequently missing together."""
         n_rows = len(df)
         if n_rows == 0:
-            return findings
+            return []
 
-        # Only consider columns with meaningful missingness
-        null_ratios = df.isnull().sum() / n_rows
+        profiles = {profile.name: profile for profile in dataset_info.columns}
+        null_ratios = pd.Series(
+            {
+                column: profiles[str(column)].null_count / n_rows
+                for column in df.columns
+            },
+            dtype="float64",
+        )
         missing_cols = null_ratios[
             null_ratios >= cfg.missingness_min_missing_ratio
         ].index.tolist()
-
         if len(missing_cols) < 2:
-            return findings
+            return []
 
-        # Build missingness indicator matrix
-        miss_matrix = df[missing_cols].isnull().astype(int)
+        analysis_df = df.loc[:, missing_cols]
+        if not full_analysis and len(analysis_df) > cfg.missingness_max_rows:
+            analysis_df = analysis_df.sample(
+                n=cfg.missingness_max_rows,
+                random_state=42,
+            )
 
-        # Compute pairwise correlations of missingness indicators
-        try:
-            miss_corr = miss_matrix.corr()
-        except Exception:
-            return findings
+        miss_corr = analysis_df.isnull().corr()
+        matrix = miss_corr.to_numpy(dtype=np.float64)
+        upper_rows, upper_cols = np.triu_indices_from(matrix, k=1)
 
-        # Find highly correlated pairs
-        reported: set[frozenset[str]] = set()
-        for i, col_a in enumerate(missing_cols):
-            for col_b in missing_cols[i + 1:]:
-                corr_val = float(miss_corr.loc[col_a, col_b])
+        graph = nx.Graph()
+        for row_index, column_index in zip(upper_rows, upper_cols, strict=False):
+            correlation = matrix[row_index, column_index]
+            if (
+                not np.isfinite(correlation)
+                or abs(correlation) < cfg.missingness_correlation_threshold
+            ):
+                continue
+            graph.add_edge(
+                missing_cols[row_index],
+                missing_cols[column_index],
+                correlation=float(correlation),
+            )
 
-                if abs(corr_val) < cfg.missingness_correlation_threshold:
-                    continue
+        findings: list[Finding] = []
+        for component in nx.connected_components(graph):
+            columns = sorted(component)
+            edges = sorted(
+                graph.subgraph(component).edges(data=True),
+                key=lambda edge: abs(float(edge[2]["correlation"])),
+                reverse=True,
+            )
+            if not edges:
+                continue
 
-                pair = frozenset([col_a, col_b])
-                if pair in reported:
-                    continue
-                reported.add(pair)
+            left, right, strongest_data = edges[0]
+            strongest = float(strongest_data["correlation"])
+            both_missing = int((df[left].isnull() & df[right].isnull()).sum())
+            both_missing_ratio = both_missing / n_rows
+            pair_details = [
+                {
+                    "pair": [edge_left, edge_right],
+                    "correlation": round(float(data["correlation"]), 4),
+                }
+                for edge_left, edge_right, data in edges[:25]
+            ]
 
-                # Count how often both are missing simultaneously
-                both_missing = int((df[col_a].isnull() & df[col_b].isnull()).sum())
-                both_missing_ratio = both_missing / n_rows
+            findings.append(Finding(
+                module=self.name,
+                title=(
+                    f"Correlated missingness group: {', '.join(columns[:4])}"
+                    + ("..." if len(columns) > 4 else "")
+                ),
+                description=(
+                    f"{len(columns)} columns form a connected missingness group. "
+                    f"The strongest relationship is between '{left}' and '{right}' "
+                    f"(r={strongest:.3f}); both are missing in {both_missing:,} rows "
+                    f"({both_missing_ratio:.1%}). This suggests a shared source, collection "
+                    "condition, or pipeline failure."
+                ),
+                evidence={
+                    "column_a": left,
+                    "column_b": right,
+                    "missingness_correlation": round(strongest, 4),
+                    "both_missing_count": both_missing,
+                    "both_missing_ratio": round(both_missing_ratio, 4),
+                    "missing_ratio_a": round(float(null_ratios[left]), 4),
+                    "missing_ratio_b": round(float(null_ratios[right]), 4),
+                    "threshold": cfg.missingness_correlation_threshold,
+                    "group_columns": columns,
+                    "group_size": len(columns),
+                    "qualifying_pair_count": len(edges),
+                    "pair_details": pair_details,
+                    "analysis_rows": len(analysis_df),
+                    "total_rows": n_rows,
+                    "sampled": len(analysis_df) < n_rows,
+                },
+                severity=Severity.MEDIUM if abs(strongest) > 0.85 else Severity.LOW,
+                confidence=min(abs(strongest), 1.0),
+                recommendation=(
+                    "Investigate the group as one data-generation subsystem. Consider joint "
+                    "imputation or indicator strategies that preserve the shared pattern."
+                ),
+                affected_columns=columns,
+                metadata={
+                    "anomaly_strength": abs(strongest),
+                    "correlation_strength": abs(strongest),
+                    "impact": both_missing_ratio,
+                    "category": "missingness_relationships",
+                },
+            ))
 
-                findings.append(Finding(
-                    module=self.name,
-                    title=(
-                        f"Correlated missingness between '{col_a}' and '{col_b}' "
-                        f"(r={corr_val:.2f})"
-                    ),
-                    description=(
-                        f"Columns '{col_a}' and '{col_b}' tend to be missing together "
-                        f"(missingness correlation = {corr_val:.3f}). They are both missing "
-                        f"in {both_missing:,} rows ({both_missing_ratio:.1%}). This pattern "
-                        f"suggests a shared data source, systematic collection failure, or "
-                        f"conditional dependency. This violates MCAR assumptions and can "
-                        f"bias imputation strategies."
-                    ),
-                    evidence={
-                        "column_a": col_a,
-                        "column_b": col_b,
-                        "missingness_correlation": round(corr_val, 4),
-                        "both_missing_count": both_missing,
-                        "both_missing_ratio": round(both_missing_ratio, 4),
-                        "missing_ratio_a": round(float(null_ratios[col_a]), 4),
-                        "missing_ratio_b": round(float(null_ratios[col_b]), 4),
-                        "threshold": cfg.missingness_correlation_threshold,
-                    },
-                    severity=Severity.MEDIUM if abs(corr_val) > 0.85 else Severity.LOW,
-                    confidence=min(abs(corr_val), 1.0),
-                    recommendation=(
-                        f"Investigate whether '{col_a}' and '{col_b}' share a data source "
-                        f"or have a causal dependency. Consider joint imputation or "
-                        f"indicator-based strategies that preserve the missingness pattern."
-                    ),
-                    affected_columns=[col_a, col_b],
-                    metadata={
-                        "anomaly_strength": abs(corr_val),
-                        "correlation_strength": abs(corr_val),
-                        "impact": both_missing_ratio,
-                        "category": "missingness_relationships",
-                    },
-                ))
-
+        logger.info(
+            "Integrity/missingness graph: {} rows, {} columns, {} edges, {} groups",
+            len(analysis_df),
+            len(missing_cols),
+            graph.number_of_edges(),
+            len(findings),
+        )
         return findings
-
-    # ══════════════════════════════════════════════════════════════════
-    #  10. STRUCTURAL HEALTH SCORE
-    # ══════════════════════════════════════════════════════════════════
 
     def _compute_domain_score(self, findings: list[Finding]) -> float:
         """Compute a 0-100 health score for a single investigation domain.

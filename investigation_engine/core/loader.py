@@ -248,6 +248,8 @@ class DatasetLoader:
         for col_name in df.columns:
             col = df[col_name]
             dtype_str = str(col.dtype)
+            null_count = int(col.isnull().sum())
+            unique_count = int(col.nunique())
 
             is_numeric = pd.api.types.is_numeric_dtype(col)
             is_bool = pd.api.types.is_bool_dtype(col)
@@ -255,7 +257,7 @@ class DatasetLoader:
             is_categorical = (
                 pd.api.types.is_categorical_dtype(col)
                 or (pd.api.types.is_object_dtype(col) and not is_datetime)
-                or (is_numeric and col.nunique() < 20 and len(df) > 100)
+                or (is_numeric and unique_count < 20 and len(df) > 100)
             )
 
             # Sample non-null values
@@ -268,8 +270,8 @@ class DatasetLoader:
                 ColumnProfile(
                     name=str(col_name),
                     dtype=dtype_str,
-                    null_count=int(col.isnull().sum()),
-                    unique_count=int(col.nunique()),
+                    null_count=null_count,
+                    unique_count=unique_count,
                     is_numeric=is_numeric,
                     is_categorical=is_categorical,
                     is_datetime=is_datetime,

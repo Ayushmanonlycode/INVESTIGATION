@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
+import networkx as nx
 
 from loguru import logger
 
@@ -19,6 +21,7 @@ from investigation_engine.reasoning.prioritization.prioritizer import (
     InvestigationPrioritizer,
     InvestigationQueue,
 )
+from investigation_engine.utils.deterministic import stable_id
 
 
 @dataclass(slots=True)
@@ -26,9 +29,12 @@ class ReasoningArtifacts:
     """All intermediate outputs of the reasoning pipeline."""
 
     evidence_units: list[EvidenceUnit]
+    evidence_graph: nx.Graph
+    evidence_communities: list[list[str]]
     knowledge_objects: list[KnowledgeObject]
     hypotheses: list[Hypothesis]
     investigation_queue: InvestigationQueue
+    layer_timings: dict[str, float]
 
 
 class EvidenceFusionEngine:
@@ -36,10 +42,10 @@ class EvidenceFusionEngine:
 
     def __init__(self, config: Settings | None = None) -> None:
         self.config = config or Settings()
-        self._compression = EvidenceCompressionEngine()
+        self._compression = EvidenceCompressionEngine(self.config)
         self._knowledge = KnowledgeConstructionEngine()
         self._hypotheses = HypothesisGenerationEngine()
-        self._prioritizer = InvestigationPrioritizer()
+        self._prioritizer = InvestigationPrioritizer(self.config)
 
     def build_reasoning_artifacts(self, findings: list[Finding]) -> ReasoningArtifacts:
         """Run the full reasoning pipeline and return all intermediate artifacts."""
@@ -54,14 +60,28 @@ class EvidenceFusionEngine:
             if finding.metadata.get("category") == "structural_health_score"
         ]
 
-        evidence_units = self._compression.compress(filtered_findings)
+        timings: dict[str, float] = {}
+
+        started = time.perf_counter()
+        compression_artifacts = self._compression.build_artifacts(filtered_findings)
+        evidence_units = compression_artifacts.evidence_units
+        timings["evidence_compression"] = round(time.perf_counter() - started, 6)
+
+        started = time.perf_counter()
         knowledge_objects = self._knowledge.construct(evidence_units)
+        timings["knowledge_construction"] = round(time.perf_counter() - started, 6)
+
+        started = time.perf_counter()
         hypotheses = self._hypotheses.generate(knowledge_objects, evidence_units)
+        timings["hypothesis_generation"] = round(time.perf_counter() - started, 6)
+
+        started = time.perf_counter()
         investigation_queue = self._prioritizer.prioritize(
             hypotheses,
             knowledge_objects,
             evidence_units,
         )
+        timings["investigation_prioritization"] = round(time.perf_counter() - started, 6)
 
         if summary_findings:
             investigation_queue.investigations.extend(
@@ -80,9 +100,12 @@ class EvidenceFusionEngine:
         )
         return ReasoningArtifacts(
             evidence_units=evidence_units,
+            evidence_graph=compression_artifacts.graph,
+            evidence_communities=compression_artifacts.communities,
             knowledge_objects=knowledge_objects,
             hypotheses=hypotheses,
             investigation_queue=investigation_queue,
+            layer_timings=timings,
         )
 
     def fuse_findings(self, findings: list[Finding]) -> list[Investigation]:
@@ -93,6 +116,10 @@ class EvidenceFusionEngine:
         investigations: list[Investigation] = []
         for finding in findings:
             investigations.append(Investigation(
+                investigation_id=stable_id(
+                    "investigation",
+                    {"summary_finding_id": finding.id, "title": finding.title},
+                ),
                 title=finding.title,
                 summary=finding.description,
                 hypothesis="Unified structural integrity assessment summary.",

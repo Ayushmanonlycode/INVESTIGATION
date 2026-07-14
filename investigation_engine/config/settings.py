@@ -15,7 +15,7 @@ via the module-level config mechanism.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +24,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class EngineSettings(BaseSettings):
     """Core engine execution settings."""
 
+    analysis_profile: Literal["balanced", "full"] = Field(
+        default="balanced",
+        description=(
+            "Analysis strategy. 'balanced' uses deterministic budgets for expensive "
+            "statistical scans; 'full' removes balanced row and candidate budgets."
+        ),
+    )
     max_rows_sample: int = Field(
         default=1_000_000,
         ge=100,
@@ -50,6 +57,18 @@ class EngineSettings(BaseSettings):
     disabled_modules: list[str] = Field(
         default_factory=list,
         description="Module names to exclude from investigation.",
+    )
+    investigation_semantic_cohesion_threshold: float = Field(
+        default=0.46,
+        ge=0.0,
+        le=1.0,
+        description="Minimum deterministic semantic cohesion required before an investigation is split.",
+    )
+    max_investigation_evidence_share: float = Field(
+        default=0.60,
+        ge=0.0,
+        le=1.0,
+        description="Maximum share of all evidence units one investigation should absorb unless strongly justified.",
     )
 
 
@@ -192,6 +211,14 @@ class IntegritySettings(BaseSettings):
         le=1.0,
         description="Minimum missing ratio for a column to be included in missingness correlation.",
     )
+    missingness_max_rows: int = Field(
+        default=50_000,
+        ge=100,
+        description=(
+            "Maximum deterministic row sample used to discover missingness relationships "
+            "in the balanced analysis profile. Exact counts are computed on the full data."
+        ),
+    )
 
     # ── Structural Health Score Weights ────────────────────────────────
     health_weight_missing: float = Field(default=0.25, ge=0.0, le=1.0)
@@ -255,6 +282,30 @@ class RelationshipSettings(BaseSettings):
         ge=5,
         description="Minimum complete observations required for a pairwise test.",
     )
+    pearson_max_rows: int = Field(
+        default=50_000,
+        ge=100,
+        description="Maximum rows used for Pearson scans in the balanced profile.",
+    )
+    spearman_max_rows: int = Field(
+        default=25_000,
+        ge=100,
+        description="Maximum rows used for Spearman scans in the balanced profile.",
+    )
+    vif_max_rows: int = Field(
+        default=50_000,
+        ge=100,
+        description="Maximum rows used for VIF estimation in the balanced profile.",
+    )
+    max_correlation_candidates_per_method: int = Field(
+        default=200,
+        ge=1,
+        description=(
+            "Maximum strongest Pearson or Spearman pairs receiving significance tests "
+            "and individual findings in the balanced profile. All threshold-crossing "
+            "pairs remain available for group discovery."
+        ),
+    )
     mi_max_rows: int = Field(
         default=5000,
         ge=100,
@@ -264,6 +315,14 @@ class RelationshipSettings(BaseSettings):
         default=150,
         ge=2,
         description="Maximum numeric columns included in pairwise mutual information scans.",
+    )
+    mi_max_pairs: int = Field(
+        default=500,
+        ge=1,
+        description=(
+            "Maximum shortlisted feature pairs scanned for mutual information in the "
+            "balanced profile. The full profile scans all eligible pairs."
+        ),
     )
     mi_n_neighbors: int = Field(
         default=3,
@@ -281,6 +340,103 @@ class RelationshipSettings(BaseSettings):
         ],
         description="Common column names treated as target candidates when metadata is absent.",
     )
+
+
+class EvidenceCompressionSettings(BaseSettings):
+    """Configuration for Graph-Based Evidence Compression."""
+
+    algorithm: str = Field(
+        default="louvain",
+        description="Community detection algorithm: connected_components, louvain, greedy_modularity.",
+    )
+    edge_weight_threshold: float = Field(
+        default=0.18,
+        ge=0.0,
+        le=1.0,
+        description="Minimum edge weight required to connect two findings.",
+    )
+    structural_weight: float = Field(
+        default=0.40,
+        ge=0.0,
+        le=10.0,
+        description="Top-level weight for structural similarity.",
+    )
+    statistical_weight: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=10.0,
+        description="Top-level weight for statistical similarity.",
+    )
+    semantic_weight: float = Field(
+        default=0.25,
+        ge=0.0,
+        le=10.0,
+        description="Top-level weight for semantic similarity.",
+    )
+    shared_columns_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    shared_rows_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    shared_metadata_weight: float = Field(default=0.15, ge=0.0, le=1.0)
+    same_investigator_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    feature_family_weight: float = Field(default=0.30, ge=0.0, le=1.0)
+    severity_similarity_weight: float = Field(default=0.15, ge=0.0, le=1.0)
+    confidence_similarity_weight: float = Field(default=0.10, ge=0.0, le=1.0)
+    numeric_evidence_similarity_weight: float = Field(default=0.75, ge=0.0, le=1.0)
+    semantic_prefix_weight: float = Field(default=0.40, ge=0.0, le=1.0)
+    semantic_token_weight: float = Field(default=0.35, ge=0.0, le=1.0)
+    semantic_domain_term_weight: float = Field(default=0.25, ge=0.0, le=1.0)
+    candidate_shared_columns: bool = Field(
+        default=True,
+        description="Generate similarity candidates from shared columns.",
+    )
+    candidate_shared_feature_family: bool = Field(
+        default=True,
+        description="Generate similarity candidates from shared feature families.",
+    )
+    candidate_shared_terms: bool = Field(
+        default=True,
+        description="Generate similarity candidates from shared semantic tokens.",
+    )
+    candidate_shared_category: bool = Field(
+        default=True,
+        description="Generate similarity candidates from shared finding categories.",
+    )
+    max_index_bucket_size: int = Field(
+        default=250,
+        ge=2,
+        description="Maximum bucket size to expand into pairwise candidate comparisons.",
+    )
+    benchmark_repeat_runs: int = Field(
+        default=3,
+        ge=1,
+        le=20,
+        description="Number of runs used for benchmark timing summaries.",
+    )
+    louvain_resolution: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=5.0,
+        description="Resolution parameter passed to Louvain community detection.",
+    )
+    greedy_resolution: float = Field(
+        default=1.0,
+        ge=0.1,
+        le=5.0,
+        description="Resolution parameter passed to greedy modularity detection.",
+    )
+    random_seed: int = Field(
+        default=42,
+        ge=0,
+        description="Deterministic random seed for graph algorithms that support it.",
+    )
+
+    @field_validator("algorithm")
+    @classmethod
+    def validate_algorithm(cls, value: str) -> str:
+        allowed = {"connected_components", "louvain", "greedy_modularity"}
+        normalized = value.lower()
+        if normalized not in allowed:
+            raise ValueError(f"Invalid evidence compression algorithm: {value}.")
+        return normalized
 
 
 class ThresholdSettings(BaseSettings):
@@ -441,6 +597,9 @@ class Settings(BaseSettings):
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     integrity: IntegritySettings = Field(default_factory=IntegritySettings)
     relationship: RelationshipSettings = Field(default_factory=RelationshipSettings)
+    evidence_compression: EvidenceCompressionSettings = Field(
+        default_factory=EvidenceCompressionSettings
+    )
 
     # Output
     output_dir: Path | None = Field(

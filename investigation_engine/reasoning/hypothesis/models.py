@@ -26,15 +26,31 @@ class Hypothesis(BaseModel):
         default_factory=list,
         description="EvidenceUnit IDs supporting this hypothesis.",
     )
+    supporting_knowledge_objects: list[str] = Field(
+        default_factory=list,
+        description="KnowledgeObject IDs supporting this hypothesis.",
+    )
     contradicting_evidence: list[str] = Field(
         default_factory=list,
         description="EvidenceUnit IDs that weaken or complicate this hypothesis.",
+    )
+    contradicting_knowledge_objects: list[str] = Field(
+        default_factory=list,
+        description="KnowledgeObject IDs that weaken or complicate this hypothesis.",
+    )
+    unknown_evidence: list[str] = Field(
+        default_factory=list,
+        description="Explicit unknown evidence gaps that limit the hypothesis.",
     )
     unknowns: list[str] = Field(
         default_factory=list,
         description="Explicit unknowns that remain unresolved.",
     )
     confidence: float = Field(..., ge=0.0, le=1.0, description="Hypothesis confidence.")
+    confidence_breakdown: dict[str, float] = Field(
+        default_factory=dict,
+        description="Explainable weighted factors contributing to the hypothesis confidence.",
+    )
     plausible_causes: list[str] = Field(
         default_factory=list,
         description="Possible causes suggested by the evidence.",

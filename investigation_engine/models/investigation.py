@@ -126,6 +126,18 @@ class InvestigationResult(BaseModel):
         default_factory=dict,
         description="Extensible investigation run metadata.",
     )
+    reasoning_metrics: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional explainable reasoning metrics for the run.",
+    )
+    provenance_trees: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Optional rendered reasoning lineage trees.",
+    )
+    benchmark_reports: dict[str, Any] | None = Field(
+        default=None,
+        description="Optional benchmark results attached to the run.",
+    )
 
     model_config = {
         "frozen": False,
