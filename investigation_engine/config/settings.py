@@ -15,7 +15,7 @@ via the module-level config mechanism.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -24,6 +24,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class EngineSettings(BaseSettings):
     """Core engine execution settings."""
 
+    analysis_profile: Literal["balanced", "full"] = Field(
+        default="balanced",
+        description=(
+            "Analysis strategy. 'balanced' uses deterministic budgets for expensive "
+            "statistical scans; 'full' removes balanced row and candidate budgets."
+        ),
+    )
     max_rows_sample: int = Field(
         default=1_000_000,
         ge=100,
@@ -204,6 +211,14 @@ class IntegritySettings(BaseSettings):
         le=1.0,
         description="Minimum missing ratio for a column to be included in missingness correlation.",
     )
+    missingness_max_rows: int = Field(
+        default=50_000,
+        ge=100,
+        description=(
+            "Maximum deterministic row sample used to discover missingness relationships "
+            "in the balanced analysis profile. Exact counts are computed on the full data."
+        ),
+    )
 
     # ── Structural Health Score Weights ────────────────────────────────
     health_weight_missing: float = Field(default=0.25, ge=0.0, le=1.0)
@@ -267,6 +282,30 @@ class RelationshipSettings(BaseSettings):
         ge=5,
         description="Minimum complete observations required for a pairwise test.",
     )
+    pearson_max_rows: int = Field(
+        default=50_000,
+        ge=100,
+        description="Maximum rows used for Pearson scans in the balanced profile.",
+    )
+    spearman_max_rows: int = Field(
+        default=25_000,
+        ge=100,
+        description="Maximum rows used for Spearman scans in the balanced profile.",
+    )
+    vif_max_rows: int = Field(
+        default=50_000,
+        ge=100,
+        description="Maximum rows used for VIF estimation in the balanced profile.",
+    )
+    max_correlation_candidates_per_method: int = Field(
+        default=200,
+        ge=1,
+        description=(
+            "Maximum strongest Pearson or Spearman pairs receiving significance tests "
+            "and individual findings in the balanced profile. All threshold-crossing "
+            "pairs remain available for group discovery."
+        ),
+    )
     mi_max_rows: int = Field(
         default=5000,
         ge=100,
@@ -276,6 +315,14 @@ class RelationshipSettings(BaseSettings):
         default=150,
         ge=2,
         description="Maximum numeric columns included in pairwise mutual information scans.",
+    )
+    mi_max_pairs: int = Field(
+        default=500,
+        ge=1,
+        description=(
+            "Maximum shortlisted feature pairs scanned for mutual information in the "
+            "balanced profile. The full profile scans all eligible pairs."
+        ),
     )
     mi_n_neighbors: int = Field(
         default=3,

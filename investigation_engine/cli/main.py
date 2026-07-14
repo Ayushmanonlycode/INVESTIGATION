@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from enum import StrEnum
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -22,16 +23,29 @@ app = typer.Typer(
 console = Console()
 
 
+class AnalysisProfile(StrEnum):
+    """Supported performance and coverage profiles."""
+
+    BALANCED = "balanced"
+    FULL = "full"
+
+
 def _parse_modules(modules_str: str | None) -> list[str] | None:
     if modules_str is None:
         return None
     return [item.strip() for item in modules_str.split(",") if item.strip()]
 
 
-def _build_config(log_level: str) -> "Settings":  # type: ignore[name-defined]  # noqa: F821
+def _build_config(
+    log_level: str,
+    analysis_profile: AnalysisProfile | None = None,
+) -> "Settings":  # type: ignore[name-defined]  # noqa: F821
     from investigation_engine.config.settings import LoggingSettings, Settings
 
-    return Settings(logging=LoggingSettings(log_level=log_level.upper()))
+    config = Settings(logging=LoggingSettings(log_level=log_level.upper()))
+    if analysis_profile is not None:
+        config.engine.analysis_profile = analysis_profile.value
+    return config
 
 
 def _load_result_for_source(
@@ -76,6 +90,14 @@ def investigate(
         typer.Option("--output", "-o", help="Path to write exported output."),
     ] = None,
     log_level: Annotated[str, typer.Option("--log-level", "-l", help="Logging level.")] = "INFO",
+    profile: Annotated[
+        AnalysisProfile | None,
+        typer.Option(
+            "--profile",
+            help="Analysis coverage: balanced uses budgets; full removes balanced budgets.",
+            case_sensitive=False,
+        ),
+    ] = None,
     verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show detailed findings in console.")] = False,
     explain: Annotated[bool, typer.Option("--explain", help="Render complete reasoning provenance trees.")] = False,
     metrics: Annotated[bool, typer.Option("--metrics", help="Display reasoning and compression metrics.")] = False,
@@ -85,7 +107,7 @@ def investigate(
     from investigation_engine.reasoning.provenance.renderer import ProvenanceTreeRenderer
     from investigation_engine.reports.exporters import flatten_nested_dict, markdown_table, write_json, write_report
 
-    config = _build_config(log_level)
+    config = _build_config(log_level, profile)
 
     console.print(
         Panel(
